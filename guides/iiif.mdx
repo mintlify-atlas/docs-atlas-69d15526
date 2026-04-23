@@ -1,0 +1,189 @@
+---
+title: "IIIF Manifests, Image Serving, and Universal Viewer"
+description: "Configure IIIF manifest generation, image server integration, Universal Viewer embedding, and manifest caching for image and audiovisual content in Hyrax."
+---
+
+Hyrax provides built-in support for the [IIIF (International Image Interoperability Framework)](https://iiif.io) Presentation API. Every work in your repository can expose a IIIF manifest, and the Universal Viewer (or a configurable alternative) is embedded on work show pages when an image server is available. This gives users pan-and-zoom image viewing, audiovisual playback, and deep-linking into page sequences — all without additional plugins.
+
+## What Hyrax provides out of the box
+
+- **Manifest generation** via `IIIFManifest::ManifestFactory` for every work, including thumbnail canvases, metadata, and rendering links.
+- **Universal Viewer** embedded on work show pages for images, audio, and video when `iiif_image_server` is enabled.
+- **Manifest caching** to avoid regenerating large manifests on every request (default: 30 days).
+- **The `hyrax:riiif` generator** for spinning up an embedded [RIIIF](https://github.com/sul-dlss/riiif) image server without an external dependency.
+
+## Enabling the IIIF image server
+
+IIIF image serving is disabled by default. Enable it in `config/initializers/hyrax.rb`:
+
+```ruby
+# config/initializers/hyrax.rb
+Hyrax.config do |config|
+  config.iiif_image_server = true
+end
+```
+
+With this set to `true`, Hyrax will attempt to build IIIF image URLs using the configured `iiif_image_url_builder` and `iiif_info_url_builder` lambdas, and the Universal Viewer will be shown on work pages for image FileSets.
+
+<Note>
+Setting `iiif_image_server = true` alone does not start an image server. You must either run the `hyrax:riiif` generator to add an embedded RIIIF server, or configure the URL builder lambdas to point at an external IIIF-compliant image server (Cantaloupe, Loris, etc.).
+</Note>
+
+## Using the embedded RIIIF image server
+
+The `hyrax:riiif` generator adds [RIIIF](https://github.com/sul-dlss/riiif) — a lightweight Rack-based IIIF image server — directly into your application:
+
+```bash
+rails generate hyrax:riiif
+```
+
+After running the generator, the RIIIF engine is mounted inside your app and Hyrax's URL builders are automatically pointed at it. No external image server is required. This is the quickest path to full IIIF support for development and smaller production deployments.
+
+## Configuring URL builders
+
+For external image servers, override the two URL builder lambdas. Both receive contextual arguments and must return a valid URL string:
+
+<CodeGroup>
+```ruby iiif_image_url_builder
+# config/initializers/hyrax.rb
+Hyrax.config do |config|
+  config.iiif_image_server = true
+
+  # Returns a IIIF Image API URL for a given file
+  # Arguments: file_id, base_url, size, format
+  config.iiif_image_url_builder = lambda do |file_id, base_url, size, format|
+    "https://images.example.org/iiif/2/#{file_id}/full/#{size}/0/default.#{format}"
+  end
+end
+```
+
+```ruby iiif_info_url_builder
+# config/initializers/hyrax.rb
+Hyrax.config do |config|
+  # Returns the URL of the IIIF info.json document for a file
+  # Arguments: file_id, base_url
+  config.iiif_info_url_builder = lambda do |file_id, base_url|
+    "https://images.example.org/iiif/2/#{file_id}/info.json"
+  end
+end
+```
+</CodeGroup>
+
+The default `iiif_image_url_builder` falls back to the Hyrax download route (`/downloads/:id`), which serves the file directly but does not comply with the IIIF Image API. Replace it with a real builder when connecting to an external server.
+
+## Manifest caching
+
+IIIF manifests can be expensive to generate for works with many FileSets. Hyrax caches the generated manifest using Rails' cache store. The default TTL is 30 days:
+
+```ruby
+Hyrax.config do |config|
+  # Duration in seconds; default is 30.days.to_i
+  config.iiif_manifest_cache_duration = 30.days.to_i
+end
+```
+
+The manifest cache is keyed by work ID and is automatically invalidated when a work's metadata or file membership changes through normal Hyrax callbacks.
+
+## Metadata fields in the manifest
+
+The IIIF manifest includes a `metadata` section populated from the work's attributes. By default, Hyrax uses the required fields from `Hyrax::Forms::WorkForm`. Override this with an explicit array of field symbols:
+
+```ruby
+Hyrax.config do |config|
+  config.iiif_metadata_fields = %i[
+    title
+    creator
+    description
+    date_created
+    subject
+    language
+    rights_statement
+    identifier
+  ]
+end
+```
+
+## Compliance level and image size defaults
+
+```ruby
+Hyrax.config do |config|
+  # Advertise your server's IIIF Image API compliance level
+  config.iiif_image_compliance_level_uri = 'http://iiif.io/api/image/2/level2.json'
+
+  # Default size parameter used when requesting images
+  # '600,' means 600px wide, height calculated proportionally
+  config.iiif_image_size_default = '600,'
+end
+```
+
+## Audio/video viewer configuration
+
+For audiovisual content, Hyrax renders a viewer partial. The default is Universal Viewer, which handles both AV and image content:
+
+```ruby
+Hyrax.config do |config|
+  # :universal_viewer is the default; change to use a different AV viewer partial
+  config.iiif_av_viewer = :universal_viewer
+end
+```
+
+The symbol maps to a partial at `app/views/hyrax/base/_<viewer>.html.erb`. To use a different viewer, create the corresponding partial and set this option to its symbol name.
+
+## Rendering predicate
+
+The IIIF Presentation API allows a manifest to advertise alternative renderings (e.g., a PDF download) using the `rendering` property. Hyrax uses `dc:hasFormat` by default, following the IIIF Presentation API context:
+
+```ruby
+Hyrax.config do |config|
+  # Default: RDF::Vocab::DC.hasFormat
+  config.rendering_predicate = ::RDF::Vocab::DC.hasFormat
+end
+```
+
+## Full IIIF configuration example
+
+<Steps>
+  <Step title="Run the RIIIF generator">
+    ```bash
+    rails generate hyrax:riiif
+    ```
+  </Step>
+
+  <Step title="Enable IIIF and configure caching">
+    ```ruby
+    # config/initializers/hyrax.rb
+    Hyrax.config do |config|
+      config.iiif_image_server          = true
+      config.iiif_manifest_cache_duration = 7.days.to_i
+      config.iiif_image_compliance_level_uri = 'http://iiif.io/api/image/2/level2.json'
+      config.iiif_image_size_default    = '600,'
+      config.iiif_av_viewer             = :universal_viewer
+      config.rendering_predicate        = ::RDF::Vocab::DC.hasFormat
+
+      config.iiif_metadata_fields = %i[
+        title
+        creator
+        description
+        rights_statement
+      ]
+    end
+    ```
+  </Step>
+
+  <Step title="Verify in development">
+    Start your application and deposit a work with an image file. Navigate to the work's show page — the Universal Viewer should appear above the metadata section. Check the manifest directly at:
+
+    ```
+    /concern/<work_type>/<work_id>/manifest
+    ```
+  </Step>
+</Steps>
+
+<CardGroup cols={2}>
+  <Card title="Background Jobs" icon="gears" href="/guides/background-jobs">
+    CharacterizeJob extracts image dimensions and channels needed for optimal IIIF tile generation.
+  </Card>
+  <Card title="Work Types" icon="hammer" href="/guides/work-types">
+    Control which metadata fields appear in the IIIF manifest by customizing your work type's form.
+  </Card>
+</CardGroup>

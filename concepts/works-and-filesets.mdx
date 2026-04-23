@@ -1,0 +1,282 @@
+---
+title: "Works, File Sets, and the PCDM Object Model"
+description: "Learn how Hyrax models repository objects as Works containing File Sets, built on PCDM with metadata schemas, file characterization, and Solr indexing."
+---
+
+In Hyrax, a **work** is the primary repository object — the unit of intellectual content that users deposit, discover, and manage. Every work groups together descriptive metadata (title, creator, rights statement, etc.) with one or more **file sets**, each of which holds the actual files representing that content. This two-tier structure follows the [Portland Common Data Model (PCDM)](https://wiki.lyrasis.org/display/samvera/Hydra::Works+Shared+Modeling), which separates the intellectual description of an item from the bitstreams that represent it. Under the hood, both `Hyrax::Work` and `Hyrax::FileSet` extend `Hyrax::Resource` (a Valkyrie resource), giving them type-safe attributes and adapter-independent persistence.
+
+## The PCDM model
+
+PCDM defines a hierarchy of objects, collections, and files. In Hyrax's implementation:
+
+<CardGroup cols={2}>
+  <Card title="Hyrax::Work" icon="folder-open">
+    A PCDM Object that holds metadata and references to member file sets and child works via the `member_ids` attribute.
+  </Card>
+  <Card title="Hyrax::FileSet" icon="file">
+    A PCDM Object that groups related `FileMetadata` records. Each `FileMetadata` points to a stored binary file (original, thumbnail, extracted text, etc.).
+  </Card>
+</CardGroup>
+
+Both models declare `pcdm_object? = true`, which signals to Hyrax's query and indexing infrastructure that they are first-class repository objects.
+
+## Work attributes
+
+`Hyrax::Work` is defined in `app/models/hyrax/work.rb` and inherits from `Hyrax::Resource`. Its core structural attributes are:
+
+```ruby
+# app/models/hyrax/work.rb
+class Work < Hyrax::Resource
+  include Hyrax::Schema(:core_metadata) if Hyrax.config.work_default_metadata
+
+  attribute :admin_set_id,             Valkyrie::Types::ID
+  attribute :member_ids,               Valkyrie::Types::Array.of(Valkyrie::Types::ID).meta(ordered: true)
+  attribute :member_of_collection_ids, Valkyrie::Types::Set.of(Valkyrie::Types::ID)
+  attribute :on_behalf_of,             Valkyrie::Types::String
+  attribute :proxy_depositor,          Valkyrie::Types::String
+  attribute :state,                    Valkyrie::Types::URI.default(Hyrax::ResourceStatus::ACTIVE)
+  attribute :rendering_ids,            Valkyrie::Types::Array.of(Valkyrie::Types::ID).meta(ordered: true)
+  attribute :representative_id,        Valkyrie::Types::ID.optional
+  attribute :thumbnail_id,             Valkyrie::Types::ID.optional
+end
+```
+
+Key points:
+
+- `member_ids` holds the ordered list of child file set and child work IDs.
+- `member_of_collection_ids` tracks which user collections the work belongs to (a work may belong to many collections).
+- `admin_set_id` points to the single administrative set that governs the work's workflow and default permissions.
+- `representative_id` and `thumbnail_id` reference the file set used for the work's display image.
+
+## Core and basic metadata schemas
+
+Hyrax uses YAML-driven schemas loaded via `Hyrax::Schema(:schema_name)`. The `core_metadata` schema defines the minimum required fields:
+
+```yaml
+# config/metadata/core_metadata.yaml
+attributes:
+  title:
+    type: string
+    multiple: true
+    index_keys:
+      - "title_sim"
+      - "title_tesim"
+    form:
+      required: true
+      primary: true
+      multiple: true
+    predicate: http://purl.org/dc/terms/title
+  date_modified:
+    type: date_time
+    predicate: http://purl.org/dc/terms/modified
+  date_uploaded:
+    type: date_time
+    predicate: http://purl.org/dc/terms/dateSubmitted
+  depositor:
+    type: string
+    predicate: http://id.loc.gov/vocabulary/relators/dpt
+    index_keys:
+      - "depositor_ssim"
+      - "depositor_tesim"
+```
+
+The `basic_metadata` schema adds the full descriptive metadata set used by most work types, including `creator`, `description`, `keyword`, `rights_statement`, `license`, `subject`, `language`, `publisher`, `resource_type`, and more — each with RDF predicates and Solr index keys.
+
+## Generating a custom work type
+
+Hyrax ships with a generator that scaffolds a new Valkyrie-based work type:
+
+```bash
+rails generate hyrax:work_resource GenericWorkResource
+```
+
+This generates a model that inherits from `Hyrax::Work` and includes the relevant schemas:
+
+```ruby
+# Generated via `rails generate hyrax:work_resource GenericWorkResource`
+class GenericWorkResource < Hyrax::Work
+  if Hyrax.config.work_include_metadata?
+    include Hyrax::Schema(:core_metadata) unless Hyrax.config.work_default_metadata?
+    include Hyrax::Schema(:basic_metadata)
+    include Hyrax::Schema(:generic_work_resource)
+  end
+end
+```
+
+Custom attributes for your work type go into `config/metadata/generic_work_resource.yaml`:
+
+```yaml
+# config/metadata/generic_work_resource.yaml
+attributes:
+  doi:
+    type: string
+    multiple: false
+    index_keys:
+      - "doi_sim"
+      - "doi_tesim"
+    form:
+      required: false
+      primary: false
+```
+
+Register the new work type in `config/initializers/hyrax.rb`:
+
+```ruby
+Hyrax.config do |config|
+  config.register_curation_concern :generic_work_resource
+end
+```
+
+## File sets
+
+`Hyrax::FileSet` is defined in `app/models/hyrax/file_set.rb`. It tracks its contained files through `FileMetadata` records:
+
+```ruby
+# app/models/hyrax/file_set.rb
+class FileSet < Hyrax::Resource
+  attribute :file_ids, Valkyrie::Types::Array.of(Valkyrie::Types::ID)
+
+  def original_file
+    Hyrax.custom_queries.find_original_file(file_set: self)
+  end
+
+  def thumbnail
+    Hyrax.custom_queries.find_thumbnail(file_set: self)
+  end
+
+  def extracted_text
+    Hyrax.custom_queries.find_extracted_text(file_set: self)
+  end
+
+  def iiif_id
+    orig_file = original_file
+    return nil if orig_file.nil? || orig_file.file_identifier.blank?
+    latest_file = Hyrax::VersioningService.latest_version_of(orig_file)
+    version = latest_file&.version_id ? Digest::MD5.hexdigest(latest_file.version_id) : nil
+    "#{id}/files/#{orig_file.id}#{'/' + version if version}"
+  end
+end
+```
+
+A file set exposes convenience methods for the named file uses:
+
+| Method | Description |
+|---|---|
+| `original_file` | The deposited original binary |
+| `thumbnail` | A generated thumbnail image |
+| `extracted_text` | Text extracted by OCR or document parsing |
+| `iiif_id` | A versioned IIIF-compatible identifier |
+
+## Work-to-file set relationship
+
+The relationship is defined by `member_ids` on the work. The file set itself does not store a back-reference; instead it is found through inverse lookup.
+
+```ruby
+# Add a file set to a work
+work.member_ids += [file_set.id]
+work.representative_id = file_set.id if work.representative_id.blank?
+work.thumbnail_id      = file_set.id if work.thumbnail_id.blank?
+Hyrax.persister.save(resource: work)
+Hyrax.publisher.publish('object.metadata.updated', object: work, user: current_user)
+
+# Find all file sets for a work
+file_sets = Hyrax.custom_queries.find_child_file_sets(resource: work)
+
+# Find the parent work from a file set
+parent_work = Hyrax.custom_queries.find_parent_work(resource: file_set)
+```
+
+<Note>
+A file set must belong to exactly one work. A work may have zero or more file sets, and the ordering of file sets within a work is preserved by `member_ids`.
+</Note>
+
+## File characterization and derivatives
+
+After a file is ingested, Hyrax queues two background jobs automatically.
+
+<Steps>
+  <Step title="CharacterizeJob">
+    Runs `Hydra::Works::CharacterizationService` (wrapping FITS) against the file. Extracted properties — MIME type, file size, image dimensions, checksum — are stored on the `FileMetadata` record and re-indexed into Solr.
+
+    ```ruby
+    # app/jobs/characterize_job.rb
+    class CharacterizeJob < Hyrax::ApplicationJob
+      queue_as Hyrax.config.ingest_queue_name
+      self.characterization_service = Hydra::Works::CharacterizationService
+
+      def perform(file_set, file_id, filepath = nil)
+        characterization_service.run(
+          file_set.characterization_proxy,
+          filepath,
+          **Hyrax.config.characterization_options
+        )
+        file_set.characterization_proxy.save!
+        Hyrax.publisher.publish('file.characterized',
+                                file_set: file_set,
+                                file_id: file_id,
+                                path_hint: filepath)
+      end
+    end
+    ```
+  </Step>
+  <Step title="CreateDerivativesJob">
+    Generates derivative files (thumbnails, web-optimized PDFs, etc.) from the original file. After generation, the file set and its parent work are re-indexed so the new thumbnail appears in search results.
+
+    ```ruby
+    # app/jobs/create_derivatives_job.rb
+    class CreateDerivativesJob < Hyrax::ApplicationJob
+      def perform(file_set, file_id, filepath = nil)
+        return if file_set.video? && !Hyrax.config.enable_ffmpeg
+        file_set.create_derivatives(filepath)
+        file_set.reload
+        file_set.update_index
+        file_set.parent.update_index if parent_needs_reindex?(file_set)
+      end
+    end
+    ```
+  </Step>
+</Steps>
+
+## Solr indexing
+
+Works and file sets are indexed into Solr for discovery. Each work type gets a corresponding indexer generated alongside the model:
+
+```ruby
+# Generated via `rails generate hyrax:work_resource GenericWorkResource`
+class GenericWorkResourceIndexer < Hyrax::Indexers::PcdmObjectIndexer(GenericWorkResource)
+  if Hyrax.config.work_include_metadata?
+    include Hyrax::Indexer(:core_metadata)
+    include Hyrax::Indexer(:basic_metadata)
+    include Hyrax::Indexer(:generic_work_resource)
+  end
+
+  # Custom indexing example:
+  # def to_solr
+  #   super.tap do |index_document|
+  #     index_document[:doi_tesim] = resource.doi.to_s
+  #   end
+  # end
+end
+```
+
+Metadata fields defined in the YAML schemas carry their Solr key suffixes with them. For example, the `title` field is indexed as `title_sim` (string, indexed, multi-valued) for faceting and `title_tesim` (text English, stored, indexed, multi-valued) for full-text search.
+
+## Work-to-work relationships
+
+Works can be nested. A work may have child works via `member_ids`, and a child work may have at most one parent.
+
+```ruby
+# Add a child work to a parent work
+Hyrax::Transactions::Container['work_resource.add_to_parent']
+  .call(child_work, parent_id: parent_work.id, user: current_user)
+
+# Find all child works
+child_works = Hyrax.custom_queries.find_child_works(resource: parent_work)
+
+# Find the parent work
+parent = Hyrax.custom_queries.find_parent_work(resource: child_work)
+```
+
+<Tip>
+The `member_ids` attribute on a work holds IDs for both child works and child file sets. Use `find_child_works` and `find_child_file_sets` custom queries to distinguish between the two types.
+</Tip>

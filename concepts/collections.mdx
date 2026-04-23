@@ -1,0 +1,229 @@
+---
+title: "User Collections and Administrative Sets in Hyrax"
+description: "Understand Hyrax's collection model: user collections, admin sets, collection types, nested collections, and how to work with them programmatically."
+---
+
+Hyrax provides two distinct container types for organizing works: **user collections** and **administrative sets**. Both are modeled as PCDM collections using Valkyrie resources, but they serve different purposes and carry different governance rules. User collections are researcher-facing organizational groupings — a researcher might create a collection for a dataset or a curated exhibit. Administrative sets are institution-facing containers that enforce workflow policies and default permissions for everything deposited through them. Understanding this distinction is essential to designing a Hyrax-based repository that serves both curators and end users.
+
+## The two container types
+
+<CardGroup cols={2}>
+  <Card title="User collections (Hyrax::PcdmCollection)" icon="layer-group">
+    Created by repository users to organize their own works or to share curated sets of items. Configurable through collection types with features like nesting, branding, and sharing.
+  </Card>
+  <Card title="Administrative sets (Hyrax::AdministrativeSet)" icon="shield-halved">
+    Created by administrators to govern deposit workflows, apply default permissions, and set embargo policies. Every work must belong to exactly one admin set.
+  </Card>
+</CardGroup>
+
+## Hyrax::PcdmCollection
+
+The `Hyrax::PcdmCollection` model (`app/models/hyrax/pcdm_collection.rb`) is the Valkyrie model for user collections:
+
+```ruby
+# app/models/hyrax/pcdm_collection.rb
+class PcdmCollection < Hyrax::Resource
+  include Hyrax::Schema(:core_metadata) if Hyrax.config.collection_include_metadata?
+
+  attribute :collection_type_gid, Valkyrie::Types::String
+  attribute :member_ids,          Valkyrie::Types::Array.of(Valkyrie::Types::ID).meta(ordered: true)
+  attribute :member_of_collection_ids, Valkyrie::Types::Set.of(Valkyrie::Types::ID)
+
+  def permission_manager
+    @permission_manager ||= Hyrax::PermissionManager.new(resource: self)
+  end
+
+  def visibility=(value)
+    visibility_writer.assign_access_for(visibility: value)
+  end
+end
+```
+
+Key attributes:
+
+| Attribute | Description |
+|---|---|
+| `collection_type_gid` | Global ID of the `Hyrax::CollectionType` that governs this collection's behavior |
+| `member_ids` | Ordered list of member IDs (works and nested sub-collections) |
+| `member_of_collection_ids` | Set of parent collection IDs (supports nesting) |
+
+## Hyrax::AdministrativeSet
+
+`Hyrax::AdministrativeSet` (`app/models/hyrax/administrative_set.rb`) behaves like a collection but is not governed by a user-configurable collection type — it uses the locked-down Admin Set type:
+
+```ruby
+# app/models/hyrax/administrative_set.rb
+class AdministrativeSet < Hyrax::Resource
+  include Hyrax::Schema(:core_metadata) if Hyrax.config.admin_set_include_metadata?
+
+  attribute :alternative_title, Valkyrie::Types::Set.of(Valkyrie::Types::String)
+  attribute :creator,           Valkyrie::Types::Set.of(Valkyrie::Types::String)
+  attribute :description,       Valkyrie::Types::String
+
+  def collection_type_gid
+    Hyrax::CollectionType.find_or_create_admin_set_type.to_global_id
+  end
+end
+```
+
+Every work must belong to exactly one admin set. The relationship is stored on the work (`work.admin_set_id`), not on the admin set itself:
+
+```ruby
+# Find the admin set a work belongs to
+admin_set = Hyrax.query_service.find_by(id: work.admin_set_id)
+
+# Find all works in an admin set
+works = Hyrax.query_service.find_inverse_references_by(
+  id: admin_set.id,
+  property: :admin_set_id
+)
+```
+
+## Collection types
+
+Collection types (`Hyrax::CollectionType`) are ActiveRecord records stored in `hyrax_collection_types`. Each type defines a set of behavioral settings that all collections of that type share:
+
+```ruby
+# The settings flags on a collection type
+SETTINGS_ATTRIBUTES = [
+  :nestable?,
+  :discoverable?,
+  :brandable?,
+  :sharable?,
+  :share_applies_to_new_works?,
+  :allow_multiple_membership?,
+  :require_membership?,
+  :assigns_workflow?,
+  :assigns_visibility?
+].freeze
+```
+
+Two collection types are built in and cannot be deleted:
+
+<AccordionGroup>
+  <Accordion title="User Collection (machine_id: 'user_collection')">
+    The default type for collections created by repository users. Settings can be configured but cannot be changed once collections of this type exist. Supports nesting, branding, sharing, and discovery by default.
+  </Accordion>
+  <Accordion title="Admin Set (machine_id: 'admin_set')">
+    The locked type used by all `Hyrax::AdministrativeSet` objects. Its settings cannot be changed at all — admin sets always assign workflows and visibility, and they are never nestable or brandable.
+  </Accordion>
+</AccordionGroup>
+
+Finding or creating the built-in types:
+
+```ruby
+# Find or create the default user collection type
+user_type = Hyrax::CollectionType.find_or_create_default_collection_type
+
+# Find or create the admin set type
+admin_type = Hyrax::CollectionType.find_or_create_admin_set_type
+```
+
+## Nested collections
+
+Collections of a nestable type can contain other collections as sub-collections, in addition to works. The parent-child relationship is stored on the child collection's `member_of_collection_ids`:
+
+```ruby
+# Find all works in a collection (direct children only)
+works = Hyrax.custom_queries.find_child_works(resource: collection)
+
+# Find all nested sub-collections
+sub_collections = Hyrax.custom_queries.find_child_collections(resource: collection)
+
+# Find all members (works and sub-collections) in a collection
+members = Hyrax.custom_queries.find_members_of(resource: collection)
+```
+
+<Warning>
+Collection type settings, including `nestable?`, cannot be changed after collections of that type exist. Plan your collection type configuration before creating collections in production.
+</Warning>
+
+## Adding works to collections
+
+Use `Hyrax::CollectionMemberService` to add works to collections. This service handles permission checks and publishes the appropriate events:
+
+```ruby
+# Add works to a collection
+Hyrax::CollectionMemberService.add_members(
+  collection_id: collection.id,
+  members: [work1, work2],
+  user: current_user
+)
+
+# Find all collections a work belongs to
+collections = Hyrax.custom_queries.find_collections_for(resource: work)
+```
+
+<Note>
+Some collection types set `allow_multiple_membership?` to `false`. When this is the case, a work may belong to at most one collection of that type. Check `Hyrax::CollectionType.gids_that_do_not_allow_multiple_membership` to find which types enforce this constraint.
+</Note>
+
+## Collection branding
+
+Collections with `brandable?` enabled support custom banner images and logos. Branding data is stored in `Hyrax::CollectionBrandingInfo` records linked to the collection's ID. The upload and save steps are handled by transaction steps:
+
+- `Hyrax::Transactions::Steps::SaveCollectionBanner` — saves the banner image to storage and creates the branding record.
+- `Hyrax::Transactions::Steps::SaveCollectionLogo` — saves the logo image and creates its branding record.
+
+## Creating collections programmatically
+
+<Steps>
+  <Step title="Find or create a collection type">
+    ```ruby
+    collection_type = Hyrax::CollectionType.find_or_create_default_collection_type
+    ```
+  </Step>
+  <Step title="Build and persist the collection">
+    ```ruby
+    collection = Hyrax::PcdmCollection.new(
+      title: ['My Research Collection'],
+      collection_type_gid: collection_type.to_global_id.to_s
+    )
+    collection = Hyrax.persister.save(resource: collection)
+    ```
+  </Step>
+  <Step title="Set visibility and access controls">
+    ```ruby
+    collection.visibility = Hydra::AccessControls::AccessRight::VISIBILITY_TEXT_VALUE_PUBLIC
+    collection.permission_manager.edit_users  = [depositor.user_key]
+    collection.permission_manager.edit_groups = []
+    collection.permission_manager.acl.save
+    ```
+  </Step>
+  <Step title="Add works to the collection">
+    ```ruby
+    Hyrax::CollectionMemberService.add_members(
+      collection_id: collection.id,
+      members: [work],
+      user: depositor
+    )
+    ```
+  </Step>
+</Steps>
+
+## Creating an administrative set programmatically
+
+```ruby
+# Create the admin set
+admin_set = Hyrax::AdministrativeSet.new(title: ['Theses and Dissertations'])
+admin_set = Hyrax.persister.save(resource: admin_set)
+
+# Create its permission template
+template = Hyrax::PermissionTemplate.create!(source_id: admin_set.id.to_s)
+
+# Grant a user management access to the admin set
+Hyrax::PermissionTemplateAccess.create!(
+  permission_template: template,
+  agent_type: Hyrax::PermissionTemplateAccess::USER,
+  agent_id: manager_user.user_key,
+  access: Hyrax::PermissionTemplateAccess::MANAGE
+)
+
+# Load workflows for the new admin set
+Hyrax::Workflow::WorkflowImporter.load_workflow_for(permission_template: template)
+Sipity::Workflow.activate!(permission_template: template, workflow_name: 'default')
+```
+
+## Collections in search results
+
+Collections with `discoverable?` enabled appear in Hyrax's catalog search results alongside works. The `collection_type_gid` field is indexed into Solr, allowing faceting and filtering by collection type. Collection membership is stored on the work's `member_of_collection_ids` attribute, which is indexed as a Solr field to enable "find works in this collection" queries without traversing the graph.

@@ -1,0 +1,198 @@
+---
+title: "Indexers: Mapping Resources to Solr Documents"
+description: "How Hyrax indexers translate Valkyrie resource attributes into Solr document fields, built-in indexers, and how to add custom Solr fields."
+---
+
+Indexers are Ruby classes that transform a `Valkyrie::Resource` object into a flat key-value hash that Solr can store and search. Every time a work, collection, file set, or admin set is saved, Hyrax instantiates the appropriate indexer, calls `#to_solr`, and writes the resulting document to Solr. The indexer layer is entirely separate from persistence, so you can change what is indexed without touching the model.
+
+## How Indexers Are Found
+
+Hyrax uses a convention-based factory to locate indexers. Given a resource of class `Article`, it looks for a class named `ArticleIndexer`. If none is found, it falls back to `Hyrax::Indexers::ResourceIndexer`:
+
+```ruby
+# Hyrax::Indexers::ResourceIndexer.for(resource:) — abbreviated
+klass = "#{resource.class.name}Indexer".safe_constantize
+klass ||= Hyrax::Indexers::ResourceIndexer(resource.class)
+klass.new(resource: resource)
+```
+
+The generator-created `ArticleIndexer` plugs into this mechanism automatically.
+
+## Base Class: ResourceIndexer
+
+`Hyrax::Indexers::ResourceIndexer` is the root of the indexer hierarchy. It provides a `#to_solr` method that returns the minimal document every Valkyrie resource needs in Solr:
+
+| Solr Field | Source |
+|------------|--------|
+| `id` | `resource.id.to_s` |
+| `date_uploaded_dtsi` | `resource.created_at` |
+| `date_modified_dtsi` | `resource.updated_at` |
+| `system_create_dtsi` | `resource.created_at` |
+| `system_modified_dtsi` | `resource.updated_at` |
+| `has_model_ssim` | `resource.to_rdf_representation` |
+| `human_readable_type_tesim` | `resource.human_readable_type` |
+| `alternate_ids_sim` | `resource.alternate_ids.map(&:to_s)` |
+
+Concrete indexers call `super` and then modify the hash using `tap`:
+
+```ruby
+def to_solr
+  super.tap do |doc|
+    doc[:my_field_tesim] = resource.my_field.map(&:to_s)
+  end
+end
+```
+
+## Built-in Indexers
+
+### PcdmObjectIndexer
+
+`Hyrax::Indexers::PcdmObjectIndexer` indexes non-file-set PCDM objects (works). It mixes in permissions, visibility, location, thumbnail, and workflow indexing, and adds these Solr fields on top of the base document:
+
+| Solr Field | Description |
+|------------|-------------|
+| `generic_type_si` | Always `'Work'` |
+| `suppressed_bsi` | `true` when the work is in an inactive workflow state |
+| `admin_set_id_ssim` | ID of the owning admin set |
+| `admin_set_sim` / `admin_set_tesim` | Title of the owning admin set |
+| `member_of_collection_ids_ssim` | IDs of parent collections |
+| `member_of_collections_ssim` | Titles of parent collections |
+| `member_ids_ssim` | IDs of all child members (file sets, works) |
+| `depositor_ssim` / `depositor_tesim` | Depositor user key |
+| `hasRelatedMediaFragment_ssim` | ID of the representative file set |
+| `hasRelatedImage_ssim` | ID of the thumbnail file set |
+| `embargo_release_date_dtsi` | Embargo lift date (when active) |
+| `lease_expiration_date_dtsi` | Lease expiry date (when active) |
+
+### FileSetIndexer
+
+`Hyrax::Indexers::FileSetIndexer` indexes `Hyrax::FileSet` objects. In addition to the base fields it indexes characterization output from FITS, including:
+
+- `mime_type_ssi`, `original_filename_ssi`, `file_format_sim`
+- `file_size_lts`, `page_count_tesim`, `word_count_tesim`
+- `height_is`, `width_is`, `duration_tesim`, `frame_rate_tesim`
+- `checksum_tesim`, `well_formed_tesim`, `fits_version_tesim`
+- `extensions_and_mime_types_ssm` (JSON, used for derivative download links)
+
+### PcdmCollectionIndexer
+
+`Hyrax::Indexers::PcdmCollectionIndexer` indexes `Hyrax::PcdmCollection` objects. Key fields beyond the base:
+
+| Solr Field | Description |
+|------------|-------------|
+| `collection_type_gid_ssim` | GlobalID of the collection type |
+| `generic_type_sim` | Always `['Collection']` |
+| `member_of_collection_ids_ssim` | IDs of parent collections |
+| `depositor_ssim` / `depositor_tesim` | Depositor user key |
+
+### AdministrativeSetIndexer
+
+`Hyrax::Indexers::AdministrativeSetIndexer` indexes `Hyrax::AdministrativeSet` objects. It adds:
+
+| Solr Field | Description |
+|------------|-------------|
+| `generic_type_sim` | Always `['Admin Set']` |
+| `creator_ssim` / `creator_tesim` | Creator of the admin set |
+| `description_tesim` | Description |
+| `thumbnail_path_ss` | Path to the thumbnail image |
+
+## Customizing an Indexer for Your Work Type
+
+When you generate a new work type, the scaffolded indexer already inherits all `PcdmObjectIndexer` behaviour. Override `#to_solr` to add fields:
+
+<Steps>
+  <Step title="Open the generated indexer">
+    ```ruby
+    # app/indexers/article_indexer.rb
+    class ArticleIndexer < Hyrax::Indexers::PcdmObjectIndexer(Article)
+      if Hyrax.config.work_include_metadata?
+        include Hyrax::Indexer(:core_metadata)
+        include Hyrax::Indexer(:basic_metadata)
+        include Hyrax::Indexer(:article)
+      end
+      check_if_flexible(Article)
+    end
+    ```
+  </Step>
+  <Step title="Add custom Solr fields">
+    Override `#to_solr` and call `super` to preserve all inherited fields:
+
+    ```ruby
+    class ArticleIndexer < Hyrax::Indexers::PcdmObjectIndexer(Article)
+      if Hyrax.config.work_include_metadata?
+        include Hyrax::Indexer(:core_metadata)
+        include Hyrax::Indexer(:basic_metadata)
+        include Hyrax::Indexer(:article)
+      end
+      check_if_flexible(Article)
+
+      def to_solr
+        super.tap do |doc|
+          # Store DOI for exact-match faceting and display
+          doc['doi_ssi']       = resource.doi.to_s
+          # Store all funders as a multi-valued facet field
+          doc['funder_sim']    = resource.funder.map(&:to_s)
+          doc['funder_tesim']  = resource.funder.map(&:to_s)
+          # Computed field: year of publication
+          doc['pub_year_isi']  = resource.date_created.first&.to_s&.slice(0, 4)&.to_i
+        end
+      end
+    end
+    ```
+  </Step>
+  <Step title="Solr field naming conventions">
+    Hyrax follows the ActiveFedora / Solrizer suffix convention:
+
+    | Suffix | Solr type | Notes |
+    |--------|-----------|-------|
+    | `_tesim` | text, English, stored, indexed, multi-valued | Full-text search |
+    | `_ssim` | string, stored, indexed, multi-valued | Exact match / facet |
+    | `_ssi` | string, stored, indexed, single-valued | Exact match, unique |
+    | `_dtsi` | date-time, stored, indexed, single-valued | Date fields |
+    | `_bsi` | boolean, stored, indexed, single-valued | Flags |
+    | `_isi` | integer, stored, indexed, single-valued | Numeric sort/range |
+    | `_lts` | long, tri, stored | File sizes |
+  </Step>
+</Steps>
+
+## Configuring the Default Indexer Builder
+
+Hyrax uses `config.pcdm_object_indexer_builder` to look up the indexer for any work class that does not have an explicit indexer registered. You can override this lambda to change the lookup strategy:
+
+```ruby
+Hyrax.config do |config|
+  config.pcdm_object_indexer_builder = lambda do |model_class|
+    # Try the conventional name first; fall back to the Hyrax builder.
+    "#{model_class.name}Indexer".safe_constantize ||
+      Hyrax::Indexers::PcdmObjectIndexer(model_class)
+  end
+end
+```
+
+## Blacklight Search Builder Integration
+
+Indexers determine what goes into Solr, but Blacklight's `SearchBuilder` controls what comes back out. The `hyrax:install` generator patches `app/models/search_builder.rb` to add access-control and Hyrax-specific filters:
+
+```ruby
+# app/models/search_builder.rb
+class SearchBuilder < Blacklight::SearchBuilder
+  include Blacklight::Solr::SearchBuilderBehavior
+  include Hydra::AccessControlsEnforcement  # scopes results to the user's permissions
+  include Hyrax::SearchFilters              # adds work-type and suppressed-work filters
+end
+```
+
+To add a custom Solr facet backed by a field your indexer populates, configure it in `CatalogController`:
+
+```ruby
+# app/controllers/catalog_controller.rb
+configure_blacklight do |config|
+  config.add_facet_field 'funder_sim', label: 'Funder', limit: 10
+  config.add_index_field  'doi_ssi',   label: 'DOI'
+  config.add_show_field   'doi_ssi',   label: 'DOI'
+end
+```
+
+<Note>
+  The Solr field names you add in `#to_solr` must also be declared in your Solr schema (`solrconfig.xml` / `schema.xml`) or in a dynamic field rule (e.g. `*_sim`, `*_tesim`). Hyrax's bundled Solr configuration includes dynamic field rules for all common suffixes.
+</Note>

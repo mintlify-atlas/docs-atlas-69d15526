@@ -1,0 +1,252 @@
+---
+title: 'Access Control and Permissions in Hyrax'
+description: 'How Hyrax enforces access control through visibility levels, ACL-based read and edit permissions, embargoes, leases, and role-based authorization.'
+---
+
+Hyrax's access control system has two complementary layers. The first is a set of named **visibility levels** — public, registered, private, embargo, and lease — that determine broad discovery and access rights for a work. The second is a fine-grained **ACL** (Access Control List) composed of individual read and edit grants assigned to specific users and groups. Both layers are governed by `Hyrax::PermissionManager` for Valkyrie resources, backed by `Hydra::AccessControls` for legacy ActiveFedora objects. Permission templates on administrative sets and collections add a third layer by defining default access rules that apply to all newly deposited works.
+
+## Visibility levels
+
+Visibility is a shorthand that sets the `read_groups` on a resource's ACL. Setting visibility to `public` adds the public group to `read_groups`; setting it to `registered` adds only the registered-users group. The mapping is configured in `Hyrax.config.visibility_map`.
+
+<Tabs>
+  <Tab title="Public">
+    The work is discoverable and readable by anyone, including unauthenticated visitors.
+
+    ```ruby
+    work.visibility = Hydra::AccessControls::AccessRight::VISIBILITY_TEXT_VALUE_PUBLIC
+    # Equivalent string: 'open'
+    # Effect: read_groups includes 'public'
+    ```
+  </Tab>
+  <Tab title="Registered">
+    The work is readable only by authenticated users (anyone with an account on the repository).
+
+    ```ruby
+    work.visibility = Hydra::AccessControls::AccessRight::VISIBILITY_TEXT_VALUE_AUTHENTICATED
+    # Equivalent string: 'authenticated'
+    # Effect: read_groups includes 'registered'
+    ```
+  </Tab>
+  <Tab title="Private">
+    The work is readable only by users who have been explicitly granted access or who have edit rights.
+
+    ```ruby
+    work.visibility = Hydra::AccessControls::AccessRight::VISIBILITY_TEXT_VALUE_PRIVATE
+    # Equivalent string: 'restricted'
+    # Effect: read_groups is empty (no broad grants)
+    ```
+  </Tab>
+  <Tab title="Embargo">
+    The work is restricted until a release date, after which it switches to a configured post-embargo visibility.
+
+    ```ruby
+    work.visibility = Hydra::AccessControls::AccessRight::VISIBILITY_TEXT_VALUE_EMBARGO
+    # Requires an Hyrax::Embargo record to be associated with the work
+    ```
+  </Tab>
+  <Tab title="Lease">
+    The work is open until an expiration date, after which it switches to a configured post-lease visibility.
+
+    ```ruby
+    work.visibility = Hydra::AccessControls::AccessRight::VISIBILITY_TEXT_VALUE_LEASE
+    # Requires an Hyrax::Lease record to be associated with the work
+    ```
+  </Tab>
+</Tabs>
+
+<Note>
+  Visibility is not stored as an attribute on the work itself. It is derived by reading `read_groups` through `Hyrax::VisibilityReader` and written through `Hyrax::VisibilityWriter`, which translates visibility strings into ACL group grants.
+</Note>
+
+## Read and edit permissions
+
+Individual users and groups can be granted either **read** or **edit** access to a resource. Edit access implies read access. These grants are stored as ACL entries managed through `Hyrax::PermissionManager`.
+
+```ruby
+# Grant a specific user edit access
+work.permission_manager.edit_users += ['jane@example.edu']
+
+# Grant the 'curators' group read access
+work.permission_manager.read_groups += ['curators']
+
+# Remove a user from edit access
+work.permission_manager.edit_users -= ['old_editor@example.edu']
+
+# Persist the ACL changes
+work.permission_manager.acl.save
+```
+
+<Warning>
+  Calling `permission_manager.acl.save` is required to persist ACL changes. Setting `edit_users` or `read_groups` alone does not write to the database or the storage adapter.
+</Warning>
+
+## Embargoes
+
+An embargo restricts access to a work until a specified release date. The `Hyrax::Embargo` model stores four attributes:
+
+```ruby
+# app/models/hyrax/embargo.rb
+class Embargo < Valkyrie::Resource
+  attribute :embargo_release_date,      Valkyrie::Types::DateTime
+  attribute :visibility_during_embargo, Valkyrie::Types::String
+  attribute :visibility_after_embargo,  Valkyrie::Types::String
+  attribute :embargo_history,           Valkyrie::Types::Array
+end
+```
+
+| Attribute | Purpose |
+|---|---|
+| `embargo_release_date` | The date at which the embargo lifts |
+| `visibility_during_embargo` | Visibility string applied while the embargo is active (e.g., `'restricted'`) |
+| `visibility_after_embargo` | Visibility string applied once the embargo lifts (e.g., `'open'`) |
+| `embargo_history` | Append-only log of previous embargo configurations |
+
+An embargo is **active** when `embargo_release_date` is set and that date is in the future (using end-of-yesterday to avoid timezone edge cases at midnight):
+
+```ruby
+def active?
+  embargo_release_date.present? && Date.yesterday.end_of_day < embargo_release_date
+end
+```
+
+To create a work under embargo:
+
+```ruby
+embargo = Hyrax::Embargo.new(
+  embargo_release_date:      Date.parse('2027-01-01').end_of_day,
+  visibility_during_embargo: Hydra::AccessControls::AccessRight::VISIBILITY_TEXT_VALUE_PRIVATE,
+  visibility_after_embargo:  Hydra::AccessControls::AccessRight::VISIBILITY_TEXT_VALUE_PUBLIC
+)
+embargo = Hyrax.persister.save(resource: embargo)
+
+work.embargo_id = embargo.id
+work.visibility_during_embargo = embargo.visibility_during_embargo
+work.visibility_after_embargo  = embargo.visibility_after_embargo
+Hyrax.persister.save(resource: work)
+```
+
+Hyrax ships with a `Hyrax::EmbargoService` and a scheduled `EmbargoExpirationJob` that calls `Hyrax::EmbargoService.release_entries_with_expired_embargos` to release expired embargoes automatically.
+
+## Leases
+
+A lease is the inverse of an embargo: the work is accessible during the lease period and restricted once the lease expires.
+
+```ruby
+# app/models/hyrax/lease.rb
+class Lease < Valkyrie::Resource
+  attribute :lease_expiration_date,   Valkyrie::Types::DateTime
+  attribute :visibility_during_lease, Valkyrie::Types::String
+  attribute :visibility_after_lease,  Valkyrie::Types::String
+  attribute :lease_history,           Valkyrie::Types::Array
+end
+```
+
+A lease is **active** when `lease_expiration_date` is set and that date is after the end of today:
+
+```ruby
+def active?
+  lease_expiration_date.present? && Time.zone.today.end_of_day < lease_expiration_date
+end
+```
+
+Example — open access for 90 days, then restricted:
+
+```ruby
+lease = Hyrax::Lease.new(
+  lease_expiration_date:   90.days.from_now,
+  visibility_during_lease: Hydra::AccessControls::AccessRight::VISIBILITY_TEXT_VALUE_PUBLIC,
+  visibility_after_lease:  Hydra::AccessControls::AccessRight::VISIBILITY_TEXT_VALUE_PRIVATE
+)
+lease = Hyrax.persister.save(resource: lease)
+```
+
+<Note>
+  A resource cannot have an active embargo and an active lease simultaneously. Hyrax enforces this validation when saving the resource.
+</Note>
+
+## Permission templates and default access
+
+`Hyrax::PermissionTemplate` records are attached to admin sets and collections. They define the default access rules applied to every newly deposited work — which users and groups receive read or edit access, and what the default visibility is.
+
+```ruby
+# app/models/hyrax/permission_template.rb
+
+# Grant a user 'manage' access to an admin set
+Hyrax::PermissionTemplateAccess.create!(
+  permission_template: template,
+  agent_type:          Hyrax::PermissionTemplateAccess::USER,
+  agent_id:            'manager@example.edu',
+  access:              Hyrax::PermissionTemplateAccess::MANAGE
+)
+
+# Grant a group 'deposit' access
+Hyrax::PermissionTemplateAccess.create!(
+  permission_template: template,
+  agent_type:          Hyrax::PermissionTemplateAccess::GROUP,
+  agent_id:            'faculty',
+  access:              Hyrax::PermissionTemplateAccess::DEPOSIT
+)
+```
+
+The three access levels on a `PermissionTemplateAccess` record are:
+
+| Access level | Allows |
+|---|---|
+| `manage` | Full edit rights on the admin set or collection itself, and ability to manage permissions and workflows |
+| `deposit` | Deposit new works into the admin set or collection |
+| `view` | Discover and read works in the admin set or collection |
+
+### Default embargo configuration
+
+Permission templates can enforce embargo rules for all deposited works. The constants below are used to configure the `release_period` column:
+
+```yaml
+# Valid release_period values on Hyrax::PermissionTemplate
+release_period:
+  "now"    # No embargo — works are released immediately
+  "fixed"  # All works must be released on the date stored in release_date
+  "before" # Works must be released on or before release_date
+  "6mos"   # Maximum 6-month embargo
+  "1yr"    # Maximum 1-year embargo
+  "2yrs"   # Maximum 2-year embargo
+  "3yrs"   # Maximum 3-year embargo
+```
+
+```ruby
+# Validate that a given release date is acceptable for this template
+template.valid_release_date?(proposed_date)  # => true / false
+
+# Validate that a given visibility is acceptable for this template
+template.valid_visibility?('open')           # => true / false
+```
+
+## System roles
+
+Hyrax defines three system-level groups used in ACL checks:
+
+| Group | String constant | Meaning |
+|---|---|---|
+| Admin | `'admin'` | Full access to all repository objects and settings |
+| Registered | `Ability.registered_group_name` | Any authenticated user |
+| Public | `Ability.public_group_name` | Any visitor, including unauthenticated |
+
+These groups are used by `Hydra::AccessControls::Ability` (via CanCan) to build the `current_ability` object that drives authorization checks throughout the application.
+
+## Proxy deposit
+
+Hyrax supports proxy deposit: a user can authorize a proxy to deposit works on their behalf. The depositing user is stored as `proxy_depositor` on the work; the actual account on behalf of which the work is deposited is stored as `on_behalf_of`.
+
+```ruby
+# work.rb attributes for proxy deposit
+attribute :proxy_depositor, Valkyrie::Types::String  # the user who deposited
+attribute :on_behalf_of,    Valkyrie::Types::String  # the account owner
+
+# Retrieve the proxy relationship
+work.proxy_depositor  # => 'proxy_user@example.edu'
+work.on_behalf_of     # => 'account_owner@example.edu'
+```
+
+<Warning>
+  Proxy deposit relationships are managed through the user's profile page ("Manage Proxies") and stored in the `ProxyDepositRight` model. Removing a proxy relationship does not revoke access to works already deposited by that proxy.
+</Warning>

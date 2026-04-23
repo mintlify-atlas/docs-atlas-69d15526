@@ -1,0 +1,190 @@
+---
+title: "Configuring Google Analytics and Matomo in Hyrax"
+description: "Enable and configure usage analytics in Hyrax using Google Analytics 4 or Matomo, including dashboard reporting and all relevant environment variables."
+---
+
+Hyrax supports opt-in usage analytics that track page views and repository interactions. Analytics can be enabled globally and configured to use either **Google Analytics 4** or **Matomo** as the reporting provider. When reporting is also enabled, Hyrax surfaces aggregate stats on the admin dashboard and on individual work and collection pages.
+
+## Enabling analytics
+
+Analytics are disabled by default. Enable them with an environment variable or directly in the Hyrax initializer.
+
+<CodeGroup>
+  ```bash Environment variable
+  HYRAX_ANALYTICS=true
+  ```
+
+  ```ruby config/initializers/hyrax.rb
+  Hyrax.config do |config|
+    config.analytics = true
+  end
+  ```
+</CodeGroup>
+
+`analytics?` reads `HYRAX_ANALYTICS` and casts it to a boolean. Setting `config.analytics = true` in the initializer overrides the environment variable.
+
+## Choosing a provider
+
+Set `HYRAX_ANALYTICS_PROVIDER` to select your analytics backend. The default is `ga4`.
+
+```bash
+HYRAX_ANALYTICS_PROVIDER=ga4      # Google Analytics 4 (default)
+HYRAX_ANALYTICS_PROVIDER=matomo   # Matomo
+```
+
+This maps to `Hyrax.config.analytics_provider`. You can also set it in the initializer:
+
+```ruby
+Hyrax.config do |config|
+  config.analytics_provider = 'ga4'
+end
+```
+
+## Provider setup
+
+<Tabs>
+  <Tab title="Google Analytics 4">
+    GA4 requires a Measurement ID for client-side tracking and a Property ID plus service account credentials for server-side reporting.
+
+    <Steps>
+      <Step title="Create a GA4 property">
+        In Google Analytics, create a new GA4 property. Note your **Measurement ID** (format: `G-XXXXXXXXXX`) and your **Property ID** (a numeric value, e.g. `123456789`).
+      </Step>
+      <Step title="Create a service account">
+        In Google Cloud Console, create a service account with the **Viewer** role on the Analytics property. Download the JSON key file.
+      </Step>
+      <Step title="Set environment variables">
+        ```bash
+        HYRAX_ANALYTICS=true
+        HYRAX_ANALYTICS_PROVIDER=ga4
+
+        # Client-side tracking tag (Measurement ID)
+        GOOGLE_ANALYTICS_ID=G-XXXXXXXXXX
+
+        # Server-side reporting (Property ID, numeric)
+        GOOGLE_ANALYTICS_PROPERTY_ID=123456789
+
+        # Provide credentials as inline JSON or a file path (not both)
+        GOOGLE_ACCOUNT_JSON='{"type":"service_account","project_id":"...","private_key":"..."}'
+        # OR
+        GOOGLE_ACCOUNT_JSON_PATH=/secrets/google-service-account.json
+        ```
+      </Step>
+      <Step title="Enable reporting">
+        Dashboard reports require all four credential variables to be set, plus the reporting flag:
+
+        ```bash
+        HYRAX_ANALYTICS_REPORTING=true
+        ```
+
+        If any of `HYRAX_ANALYTICS_REPORTING`, `GOOGLE_ANALYTICS_ID`, `GOOGLE_ANALYTICS_PROPERTY_ID`, or the credential variable is blank, `analytics_reporting?` returns `false` and no reports are shown.
+      </Step>
+    </Steps>
+
+    <Note>
+      `GOOGLE_ACCOUNT_JSON` takes precedence over `GOOGLE_ACCOUNT_JSON_PATH`. Hyrax checks whether `GOOGLE_ACCOUNT_JSON` is blank and falls back to requiring `GOOGLE_ACCOUNT_JSON_PATH` if it is. Set exactly one of the two.
+    </Note>
+  </Tab>
+  <Tab title="Matomo">
+    Matomo requires a self-hosted or cloud Matomo instance. Client-side tracking is handled by the Matomo JavaScript tag, which you embed in your application layout.
+
+    <Steps>
+      <Step title="Configure the provider">
+        ```bash
+        HYRAX_ANALYTICS=true
+        HYRAX_ANALYTICS_PROVIDER=matomo
+        ```
+      </Step>
+      <Step title="Add the Matomo tracking tag">
+        Add the Matomo JavaScript snippet to `app/views/layouts/hyrax/1_column.html.erb` (or your custom layout). Refer to your Matomo instance's **Tag Manager** or **Tracking Code** section for the snippet.
+      </Step>
+      <Step title="Configure server-side reporting (optional)">
+        Server-side dashboard reporting for Matomo is noted as a future enhancement in Hyrax's configuration. Check the current release notes for availability.
+
+        ```ruby
+        Hyrax.config do |config|
+          config.analytics_reporting = true
+        end
+        ```
+      </Step>
+    </Steps>
+  </Tab>
+</Tabs>
+
+## Dashboard reporting
+
+When `analytics_reporting?` returns `true`, Hyrax displays analytics reports in:
+
+- The **admin dashboard** — aggregate repository-wide stats
+- **Work show pages** — per-work view counts
+- **Collection show pages** — per-collection view counts
+
+Reporting is gated on all required environment variables being non-blank. The check is performed at runtime:
+
+```ruby
+# analytics_reporting? returns false if any required variable is blank
+required_env_vars = %w[
+  HYRAX_ANALYTICS_REPORTING
+  GOOGLE_ANALYTICS_ID
+  GOOGLE_ANALYTICS_PROPERTY_ID
+  GOOGLE_ACCOUNT_JSON           # or GOOGLE_ACCOUNT_JSON_PATH
+]
+```
+
+## Analytics start date
+
+Hyrax uses a start date when computing "all-time" view metrics. Set this to the date your repository went live so that reports reflect your full history.
+
+<CodeGroup>
+  ```bash Environment variable
+  ANALYTICS_START_DATE=2021-06-15
+  ```
+
+  ```ruby config/initializers/hyrax.rb
+  Hyrax.config do |config|
+    config.analytics_start_date = '2021-06-15'
+  end
+  ```
+</CodeGroup>
+
+The format must be `YYYY-MM-DD`. When not set, Hyrax defaults to one year before the current date (`Time.zone.today - 1.year`).
+
+## Complete environment variable reference
+
+```bash
+# Enable analytics tracking
+HYRAX_ANALYTICS=true
+
+# Provider selection (ga4 or matomo)
+HYRAX_ANALYTICS_PROVIDER=ga4
+
+# Enable dashboard reporting
+HYRAX_ANALYTICS_REPORTING=true
+
+# Google Analytics 4 credentials
+GOOGLE_ANALYTICS_ID=G-XXXXXXXXXX
+GOOGLE_ANALYTICS_PROPERTY_ID=123456789
+GOOGLE_ACCOUNT_JSON='{"type":"service_account",...}'
+# OR
+GOOGLE_ACCOUNT_JSON_PATH=/secrets/google-analytics.json
+
+# All-time metrics start date (YYYY-MM-DD)
+ANALYTICS_START_DATE=2021-06-15
+```
+
+## Initializer reference
+
+All analytics options can alternatively be set in `config/initializers/hyrax.rb`. Environment variables take effect when the corresponding `config.*` attribute has not been explicitly assigned.
+
+```ruby
+Hyrax.config do |config|
+  config.analytics          = true
+  config.analytics_provider = 'ga4'       # 'ga4' or 'matomo'
+  config.analytics_reporting = true
+  config.analytics_start_date = '2021-06-15'
+end
+```
+
+<Note>
+  Setting `config.analytics = true` in the initializer is equivalent to `HYRAX_ANALYTICS=true`. The initializer value takes precedence over the environment variable because the writer method (`config.analytics =`) sets the instance variable directly, bypassing the `ENV.fetch` default in `analytics?`.
+</Note>

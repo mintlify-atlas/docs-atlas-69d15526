@@ -1,0 +1,144 @@
+---
+title: "Flexible Metadata with M3 Profiles in Hyrax v5.3+"
+description: "Enable M3-based flexible metadata in Hyrax v5.3+ so administrators can define and evolve metadata schemas through the admin dashboard without code deploys."
+---
+
+Hyrax v5.3 introduced flexible metadata — a UI-driven metadata configuration system built on M3 (Machine-readable Metadata Modeling) profiles. When enabled, administrators can create and manage metadata fields, control their labels and required status per work type, version schemas, and import or export profiles — all from the Hyrax admin dashboard, without involving a developer.
+
+Flexible metadata is **disabled by default**. Enabling it requires setting environment variables and, optionally, marking specific model classes as flexible.
+
+<Warning>
+Flexible metadata requires Hyrax v5.3 or later. Enabling it on an existing application with static schema includes (`Hyrax::Schema(:basic_metadata)`) requires additional configuration to avoid field conflicts. Read the full setup steps below before enabling in production.
+</Warning>
+
+## How flexible metadata works
+
+Two layers control flexible metadata behavior:
+
+1. **`flexible` configuration** — activates the M3 profile loader and makes the profile management UI appear in the admin dashboard. This alone does not change how any model stores or loads its metadata.
+2. **`flexible_classes` configuration** — lists model class names that should use flexible metadata for their attributes. Models in this list (or those that include `acts_as_flexible`) load their schema from the active M3 profile at runtime instead of from static YAML files.
+
+## Enabling flexible metadata
+
+<Steps>
+  <Step title="Set environment variables">
+    At minimum, set `HYRAX_FLEXIBLE=true` to enable the M3 profile UI. Combine with `HYRAX_FLEXIBLE_CLASSES` to opt specific models into flexible loading:
+
+    ```dotenv
+    # .env (or your deployment environment)
+    HYRAX_FLEXIBLE=true
+    HYRAX_FLEXIBLE_CLASSES=Hyrax::AdministrativeSet,CollectionResource,FileSet,GenericWork
+    HYRAX_DISABLE_INCLUDE_METADATA=true
+    ```
+
+    `HYRAX_FLEXIBLE_CLASSES` accepts a comma-separated list of fully qualified class names. These must match the constant names as they exist in your application.
+  </Step>
+
+  <Step title="Configure in the Hyrax initializer (alternative to ENV)">
+    You can also configure flexible metadata directly in `config/initializers/hyrax.rb` if you prefer Ruby-level configuration over environment variables:
+
+    ```ruby
+    # config/initializers/hyrax.rb
+    Hyrax.config do |config|
+      config.flexible = true
+
+      config.flexible_classes = [
+        'Hyrax::AdministrativeSet',
+        'CollectionResource',
+        'Hyrax::FileSet',
+        'GenericWorkResource'
+      ]
+
+      # Disable static schema includes so fields come from the M3 profile
+      config.admin_set_include_metadata    = false
+      config.collection_include_metadata   = false
+      config.file_set_include_metadata     = false
+      config.work_include_metadata         = false
+    end
+    ```
+  </Step>
+
+  <Step title="Disable static metadata includes">
+    By default, Hyrax models include `Hyrax::Schema(:basic_metadata)` and `Hyrax::Schema(:core_metadata)`. When using flexible metadata, these static includes need to be disabled so that field definitions come from the M3 profile instead. Set `HYRAX_DISABLE_INCLUDE_METADATA=true` or use the Ruby configuration options shown above.
+
+    <Note>
+    `HYRAX_DISABLE_INCLUDE_METADATA=true` sets all four metadata include flags (`work_include_metadata`, `collection_include_metadata`, `admin_set_include_metadata`, `file_set_include_metadata`) to `false` at once. If you only want to disable includes for specific object types, use the individual Ruby configuration options.
+    </Note>
+  </Step>
+
+  <Step title="Add acts_as_flexible to custom models (optional)">
+    If you have custom work type classes that are not listed in `HYRAX_FLEXIBLE_CLASSES`, you can opt them in individually by calling `acts_as_flexible` in the class body:
+
+    ```ruby
+    # app/models/monograph.rb
+    class Monograph < Hyrax::Work
+      acts_as_flexible
+    end
+    ```
+
+    Any class that inherits from `Hyrax::Resource` can call `acts_as_flexible`.
+  </Step>
+
+  <Step title="Import or create an M3 profile in the admin dashboard">
+    Once the application is running with `HYRAX_FLEXIBLE=true`, navigate to the admin dashboard. A new **Metadata Profiles** section will be available. From there you can:
+
+    - Create a new profile and define fields interactively.
+    - Import an existing M3 profile as JSON or YAML.
+    - Activate a specific profile version for each work type.
+  </Step>
+</Steps>
+
+## Flexible classes: Koppie vs Dassie examples
+
+Two of Hyrax's built-in test applications show different class name conventions. Use these as a reference for your own setup:
+
+<CodeGroup>
+```dotenv Koppie (Wings compatibility layer)
+HYRAX_FLEXIBLE=true
+HYRAX_FLEXIBLE_CLASSES=Hyrax::AdministrativeSet,CollectionResource,FileSet,GenericWork,Monograph
+HYRAX_DISABLE_INCLUDE_METADATA=true
+```
+
+```dotenv Dassie (Valkyrie-only)
+HYRAX_FLEXIBLE=true
+HYRAX_FLEXIBLE_CLASSES=AdministrativeSetResource,CollectionResource,Hyrax::FileSet,GenericWorkResource,Monograph
+HYRAX_DISABLE_INCLUDE_METADATA=true
+```
+</CodeGroup>
+
+The difference comes down to whether the application uses Wings-wrapped ActiveFedora class names or native Valkyrie resource class names. Check your model files to confirm the exact constant name.
+
+## M3 profile features in the admin dashboard
+
+When `flexible` is enabled, the admin dashboard exposes the following capabilities:
+
+| Feature | Description |
+|---|---|
+| Profile creation | Define metadata fields with labels, types, cardinality, and controlled vocabulary |
+| Work type configuration | Assign different field visibility, required status, and display order per work type |
+| Profile versioning | Create new versions of a profile without discarding the previous one |
+| Profile import | Upload an M3 profile document (JSON/YAML) from another system or environment |
+| Profile export | Download the active profile for backup, migration, or reuse in another tenant |
+
+<Note>
+In Hyku (the multi-tenant Hyrax application), flexible metadata profiles are scoped per tenant. Each tenant can have its own active profile independently of other tenants.
+</Note>
+
+## Checking flexible status programmatically
+
+Hyrax exposes convenience predicates on the configuration object so you can branch on flexible status in custom code:
+
+```ruby
+Hyrax.config.flexible?              # => true if HYRAX_FLEXIBLE=true
+Hyrax.config.admin_set_flexible?    # => true if AdministrativeSet is in flexible_classes
+Hyrax.config.collection_flexible?   # => true if collection model is in flexible_classes
+Hyrax.config.file_set_flexible?     # => true if file set model is in flexible_classes
+```
+
+## Static schema vs flexible schema
+
+<Warning>
+Do not mix static schema includes (`include Hyrax::Schema(:basic_metadata)`) with `acts_as_flexible` on the same model class. If a class is opted into flexible metadata, all its attribute definitions should come from the M3 profile. Static includes will conflict with the flexible loader and may produce unpredictable attribute resolution.
+</Warning>
+
+When `work_include_metadata` is `false`, the generator will skip creating the static YAML schema file for new work types and will skip injecting `include Hyrax::Schema(...)` lines into the generated model. The model will rely entirely on the active M3 profile for its attributes.

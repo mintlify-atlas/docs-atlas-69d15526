@@ -1,0 +1,211 @@
+---
+title: "Configuring Metadata Schemas in Hyrax"
+description: "Define metadata attributes for your repository objects using Hyrax's YAML-driven SimpleSchemaLoader, from core Dublin Core fields to fully custom schemas."
+---
+
+Hyrax uses a YAML-based schema system to define metadata attributes on repository objects. Rather than declaring attributes directly in Ruby model files, each schema is expressed as a structured YAML document that controls the attribute's type, cardinality, Solr index keys, RDF predicate, and form display options. This approach makes it straightforward to add fields, share schemas across gems, or switch to an M3 flexible profile without touching your model classes.
+
+## How the schema loader works
+
+Hyrax's `SimpleSchemaLoader` reads YAML files from a configurable set of search paths and makes their attribute definitions available to `Hyrax::Schema` modules included in model, form, and indexer classes. When you write `include Hyrax::Schema(:basic_metadata)`, the loader finds `config/metadata/basic_metadata.yaml` on the search path and uses its `attributes` section to define the corresponding Ruby attributes, Solr index mappings, and form fields.
+
+The search paths are configured via `schema_loader_config_search_paths`. By default, Hyrax searches your application root first, then the engine root, so application-level overrides take precedence over the defaults shipped with Hyrax:
+
+```ruby
+# config/initializers/hyrax.rb
+Hyrax.config do |config|
+  # Prepend a gem's root to pick up schema files bundled inside the gem
+  config.simple_schema_loader_config_search_paths.unshift(MyEngine::Engine.root)
+end
+```
+
+<Note>
+`schema_loader_config_search_paths`, `simple_schema_loader_config_search_paths`, and `m3_schema_loader_config_search_paths` are all aliases for the same configuration option. Use whichever name makes the intent clearest in your codebase.
+</Note>
+
+## Built-in schema files
+
+Hyrax ships with five YAML schemas in `config/metadata/`:
+
+| File | `Hyrax::Schema` key | Purpose |
+|---|---|---|
+| `core_metadata.yaml` | `:core_metadata` | `title`, `date_modified`, `date_uploaded`, `depositor` |
+| `basic_metadata.yaml` | `:basic_metadata` | Full Dublin Core and common repository fields |
+| `file_set_metadata.yaml` | `:file_set_metadata` | Fields specific to `Hyrax::FileSet` objects |
+| `batch_edit_metadata.yaml` | `:batch_edit_metadata` | Fields shown during batch editing |
+| `hyrax_internal_metadata.yaml` | `:hyrax_internal_metadata` | Internal system fields |
+
+## Core metadata fields
+
+`core_metadata.yaml` defines the minimum fields required on every work:
+
+```yaml
+# config/metadata/core_metadata.yaml
+attributes:
+  title:
+    type: string
+    multiple: true
+    index_keys:
+      - "title_sim"
+      - "title_tesim"
+    form:
+      required: true
+      primary: true
+      multiple: true
+    predicate: http://purl.org/dc/terms/title
+  date_modified:
+    type: date_time
+    predicate: http://purl.org/dc/terms/modified
+  date_uploaded:
+    type: date_time
+    predicate: http://purl.org/dc/terms/dateSubmitted
+  depositor:
+    type: string
+    predicate: http://id.loc.gov/vocabulary/relators/dpt
+    index_keys:
+      - "depositor_ssim"
+      - "depositor_tesim"
+```
+
+## Basic metadata fields
+
+`basic_metadata.yaml` contains the descriptive fields that are common to all content types in a digital repository. Key fields include:
+
+<Tabs>
+  <Tab title="Descriptive">
+    | Field | Predicate | Notes |
+    |---|---|---|
+    | `creator` | `dc:creator` | Required, faceted |
+    | `description` | `dc:description` | Multi-valued |
+    | `subject` | `dc:subject` | Faceted |
+    | `keyword` | `schema:keywords` | Faceted |
+    | `language` | `dc:language` | Faceted |
+    | `publisher` | `dc:publisher` | Faceted |
+    | `contributor` | `dc:contributor` | Faceted |
+    | `date_created` | `dcterms:created` | Linked |
+    | `abstract` | `dcterms:abstract` | Not primary |
+    | `alternative_title` | `dcterms:alternative` | Not primary |
+  </Tab>
+  <Tab title="Rights">
+    | Field | Predicate | Notes |
+    |---|---|---|
+    | `license` | `dcterms:license` | Rendered as license widget |
+    | `rights_statement` | `edm:rights` | Primary form field |
+    | `rights_notes` | `dc:rights` | Supplemental notes |
+    | `access_right` | `dcterms:accessRights` | Informational |
+  </Tab>
+  <Tab title="Identifiers & Relations">
+    | Field | Predicate | Notes |
+    |---|---|---|
+    | `identifier` | `dcterms:identifier` | Linked |
+    | `related_url` | `rdfs:seeAlso` | Rendered as external link |
+    | `based_near` | `foaf:based_near` | Geo location |
+    | `source` | `dcterms:source` | Origin |
+    | `bibliographic_citation` | `dcterms:bibliographicCitation` | Citation |
+    | `resource_type` | `dcterms:type` | Faceted |
+  </Tab>
+</Tabs>
+
+## Defining custom metadata fields
+
+Each work type generator creates a matching schema file at `config/metadata/<work_type>.yaml`. Add custom attributes there:
+
+<CodeGroup>
+```yaml config/metadata/dataset.yaml
+attributes:
+  doi:
+    type: string
+    multiple: false
+    index_keys:
+      - "doi_sim"
+      - "doi_tesim"
+    form:
+      required: false
+      primary: true
+      multiple: false
+    predicate: http://purl.org/dc/terms/identifier
+
+  funding_agency:
+    type: string
+    multiple: true
+    index_keys:
+      - "funding_agency_sim"
+      - "funding_agency_tesim"
+    form:
+      required: false
+      primary: false
+      multiple: true
+    predicate: http://schema.org/funder
+
+  embargo_release_date:
+    type: date_time
+    multiple: false
+    form:
+      required: false
+      primary: false
+    predicate: http://purl.org/dc/terms/available
+```
+
+```ruby app/models/dataset.rb
+# Generated via `rails generate hyrax:work_resource Dataset`
+class Dataset < Hyrax::Work
+  if Hyrax.config.work_include_metadata?
+    include Hyrax::Schema(:core_metadata) unless Hyrax.config.work_default_metadata?
+    include Hyrax::Schema(:basic_metadata)
+    include Hyrax::Schema(:dataset)   # loads config/metadata/dataset.yaml
+  end
+end
+```
+</CodeGroup>
+
+### Attribute type reference
+
+| Type | Ruby class | Example use |
+|---|---|---|
+| `string` | `String` | Title, identifier, description |
+| `integer` | `Integer` | Page count, duration in seconds |
+| `boolean` | `TrueClass` / `FalseClass` | Peer reviewed flag |
+| `date_time` | `DateTime` | Creation date, embargo release date |
+| `float` | `Float` | Geographic coordinates |
+| `id` | `Valkyrie::ID` | Related resource identifier |
+| `uri` | `RDF::URI` | External vocabulary term |
+
+## Schema search path configuration
+
+To bundle schema files inside a gem or engine and have Hyrax discover them automatically, prepend the gem root to the search paths in an initializer:
+
+```ruby
+# config/initializers/hyrax.rb
+Hyrax.config do |config|
+  config.simple_schema_loader_config_search_paths.unshift(HykuKnapsack::Engine.root)
+end
+```
+
+Hyrax will now look for `config/metadata/*.yaml` in `HykuKnapsack::Engine.root` before searching the application root or the Hyrax engine root.
+
+## Simple schema vs M3 flexible schema
+
+<Tabs>
+  <Tab title="Simple schema (default)">
+    - Schema files live in `config/metadata/` and are loaded at boot time.
+    - Changes require a code deploy and application restart.
+    - Full control over predicates, index keys, and form layout in YAML.
+    - Best suited for most applications with stable metadata requirements.
+  </Tab>
+  <Tab title="M3 flexible schema">
+    - Enabled via `HYRAX_FLEXIBLE=true` (requires Hyrax v5.3+).
+    - Administrators can define and modify metadata fields through the admin dashboard UI with no code changes.
+    - Supports versioned profile import and export.
+    - Static schema includes (`Hyrax::Schema(:basic_metadata)`) can be disabled by setting `HYRAX_DISABLE_INCLUDE_METADATA=true`.
+    - See the [Flexible Metadata guide](/guides/flexible-metadata) for setup instructions.
+  </Tab>
+</Tabs>
+
+<CardGroup cols={2}>
+  <Card title="Work Types" icon="hammer" href="/guides/work-types">
+    Generate and customize work type models, forms, and indexers using Hyrax's Rails generators.
+  </Card>
+  <Card title="Flexible Metadata" icon="sliders" href="/guides/flexible-metadata">
+    Enable M3 profile-based metadata management for admin-driven schema changes without deploys.
+  </Card>
+</CardGroup>

@@ -1,0 +1,164 @@
+---
+title: "hyrax:work_resource Generator Reference"
+description: "Generate Valkyrie-native work types with the hyrax:work_resource generator: models, indexers, forms, controllers, views, and specs."
+---
+
+The `hyrax:work_resource` generator creates all the files needed to define a new Valkyrie-native work type in your Hyrax application. It registers the work with `Hyrax.config`, scaffolds a controller, form, indexer, model, and search-result view, and optionally creates RSpec spec files. It is the successor to the older `hyrax:work` generator.
+
+<Note>
+  The name `Work` is reserved and will raise an error. Choose a descriptive domain name such as `Article`, `Dataset`, or `GenericWork`.
+</Note>
+
+## Usage
+
+```bash
+rails generate hyrax:work_resource NAME [field:type field:type ...]
+```
+
+`NAME` is the CamelCase class name of the new work type. Optional attribute pairs (`field:type`) declare schema attributes that are added to the generated metadata YAML file and injected into the model spec.
+
+### Namespaced Work Types
+
+Prefix the name with a Ruby namespace using a `/` separator:
+
+```bash
+rails generate hyrax:work_resource Ns/Article
+# Generates:
+#   app/models/ns/article.rb
+#   app/controllers/hyrax/ns/articles_controller.rb
+#   app/indexers/ns/article_indexer.rb
+#   app/forms/ns/article_form.rb
+```
+
+## What the Generator Creates
+
+<Steps>
+  <Step title="Model">
+    Creates `app/models/[name].rb`. The model extends `Hyrax::Work` and includes the core, basic, and work-specific metadata schemas when `config.work_include_metadata?` is `true`.
+  </Step>
+  <Step title="Metadata YAML">
+    Creates `config/metadata/[name].yaml` (only when `config.work_include_metadata?` is `false`). If attribute arguments were supplied, they are injected as YAML attribute definitions.
+  </Step>
+  <Step title="Indexer">
+    Creates `app/indexers/[name]_indexer.rb`. The indexer extends the dynamically built `PcdmObjectIndexer` for the new class and includes matching indexer modules for each metadata schema.
+  </Step>
+  <Step title="Form">
+    Creates `app/forms/[name]_form.rb`. The form extends `Hyrax::Forms::PcdmObjectForm` for the new class and includes `Hyrax::FormFields` for each applicable schema.
+  </Step>
+  <Step title="Controller">
+    Creates `app/controllers/hyrax/[plural_name]_controller.rb`. Includes `Hyrax::WorksControllerBehavior` and `Hyrax::BreadcrumbsForWorks`, and wires up `Hyrax::FormFactory` as the form service.
+  </Step>
+  <Step title="Search Result View">
+    Creates `app/views/hyrax/[plural_name]/_[name].html.erb` with a standard Blacklight document partial render.
+  </Step>
+  <Step title="Registration">
+    Injects `config.register_curation_concern :[name]` into `config/initializers/hyrax.rb` after any existing registrations.
+  </Step>
+  <Step title="RSpec Specs (when RSpec is installed)">
+    - `spec/models/[name]_spec.rb` — uses the `'a Hyrax::Work'` shared example
+    - `spec/indexers/[name]_indexer_spec.rb`
+    - `spec/views/hyrax/[plural_name]/_[name].html.erb_spec.rb`
+  </Step>
+</Steps>
+
+## Generated File Examples
+
+<CodeGroup>
+
+```ruby Model (app/models/article.rb)
+# frozen_string_literal: true
+
+# Generated via
+#  `rails generate hyrax:work_resource Article`
+class Article < Hyrax::Work
+  if Hyrax.config.work_include_metadata?
+    include Hyrax::Schema(:core_metadata) unless Hyrax.config.work_default_metadata?
+    include Hyrax::Schema(:basic_metadata)
+    include Hyrax::Schema(:article)
+  end
+end
+```
+
+```ruby Indexer (app/indexers/article_indexer.rb)
+# frozen_string_literal: true
+
+# Generated via
+#  `rails generate hyrax:work_resource Article`
+class ArticleIndexer < Hyrax::Indexers::PcdmObjectIndexer(Article)
+  if Hyrax.config.work_include_metadata?
+    include Hyrax::Indexer(:core_metadata)
+    include Hyrax::Indexer(:basic_metadata)
+    include Hyrax::Indexer(:article)
+  end
+  check_if_flexible(Article)
+
+  # Uncomment to add custom indexing behaviour:
+  #  def to_solr
+  #    super.tap do |index_document|
+  #      index_document[:my_field_tesim]   = resource.my_field.map(&:to_s)
+  #      index_document[:other_field_ssim] = resource.other_field
+  #    end
+  #  end
+end
+```
+
+```ruby Form (app/forms/article_form.rb)
+# frozen_string_literal: true
+
+# Generated via
+#  `rails generate hyrax:work_resource Article`
+#
+# @see https://github.com/samvera/hyrax/wiki/Hyrax-Valkyrie-Usage-Guide#forms
+# @see https://github.com/samvera/valkyrie/wiki/ChangeSets-and-Dirty-Tracking
+class ArticleForm < Hyrax::Forms::PcdmObjectForm(Article)
+  if Hyrax.config.work_include_metadata?
+    include Hyrax::FormFields(:basic_metadata)
+    include Hyrax::FormFields(:article)
+  end
+  check_if_flexible(Article)
+
+  # Define custom form fields using the Valkyrie::ChangeSet interface
+  # property :my_custom_form_field
+
+  # Virtual fields (not persisted to the model):
+  # property :user_input_not_destined_for_the_model, virtual: true
+end
+```
+
+```ruby Controller (app/controllers/hyrax/articles_controller.rb)
+# frozen_string_literal: true
+
+# Generated via
+#  `rails generate hyrax:work_resource Article`
+module Hyrax
+  class ArticlesController < ApplicationController
+    include Hyrax::WorksControllerBehavior
+    include Hyrax::BreadcrumbsForWorks
+    self.curation_concern_type = ::Article
+
+    # Use a Valkyrie-aware form service to generate
+    # Valkyrie::ChangeSet-style forms.
+    self.work_form_service = Hyrax::FormFactory.new
+  end
+end
+```
+
+</CodeGroup>
+
+## Adding Custom Attributes
+
+Pass attribute name/type pairs to the generator to pre-populate the metadata YAML:
+
+```bash
+rails generate hyrax:work_resource Dataset doi:string funder:string embargo_date:date
+```
+
+When `config.work_include_metadata?` is `false`, this creates `config/metadata/dataset.yaml` with those attributes declared. When metadata inclusion is enabled globally, the attributes are instead injected into the model spec as `respond_to` examples.
+
+## Reverting a Generated Work Type
+
+```bash
+rails destroy hyrax:work_resource Article
+```
+
+This removes all generated files and deletes the `register_curation_concern` line from the initializer.

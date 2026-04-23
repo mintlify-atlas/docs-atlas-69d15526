@@ -1,0 +1,213 @@
+---
+title: "Event Listeners and the Hyrax Publisher Bus"
+description: "Hyrax's dry-events Publisher broadcasts events on named streams. Subscribe custom listener classes to react to deposits, metadata changes, and file audits."
+---
+
+Hyrax ships a singleton publish/subscribe bus — `Hyrax::Publisher` — built on top of [`dry-events`](https://dry-rb.org/gems/dry-events). Every significant repository action (deposit, metadata update, file characterization, deletion, etc.) publishes a named event on that bus. Any object with matching `on_*` methods can subscribe to receive those events, making it straightforward to add local instrumentation, logging, notifications, or side-effects without monkey-patching Hyrax internals.
+
+## The event bus
+
+`Hyrax::Publisher` is a `Dry::Events::Publisher` included as a Ruby `Singleton`. You access the shared instance through the convenience accessor `Hyrax.publisher`.
+
+```ruby accessing the publisher
+Hyrax.publisher
+# => #<Hyrax::Publisher:0x...>
+```
+
+Publishing an event yourself follows the same pattern Hyrax uses internally:
+
+```ruby publishing an event
+Hyrax.publisher.publish('object.deposited', object: my_work, user: current_user)
+```
+
+Event names use dot-separated namespaces. The namespaces map to the kinds of resources involved:
+
+| Namespace | Covers |
+|-----------|--------|
+| `batch` | `BatchCreateJob` lifecycle |
+| `collection` | PCDM Collection lifecycle |
+| `file` | File / `FileMetadata` lifecycle |
+| `file.set` | Hydra Works `FileSet` lifecycle |
+| `object` | All PCDM Objects |
+
+## Available events
+
+Every event registered in `Hyrax::Publisher` is listed below. The method name your listener must implement is derived by replacing dots with underscores and prepending `on_`.
+
+| Event name | Listener method | Since |
+|---|---|---|
+| `batch.created` | `on_batch_created` | 3.0.0 |
+| `collection.deleted` | `on_collection_deleted` | 3.4.0 |
+| `collection.metadata.updated` | `on_collection_metadata_updated` | 3.0.0 |
+| `collection.membership.updated` | `on_collection_membership_updated` | 3.0.0 |
+| `file.characterized` | `on_file_characterized` | 3.5.0 |
+| `file.downloaded` | `on_file_downloaded` | 3.3.0 |
+| `file.metadata.updated` | `on_file_metadata_updated` | 3.4.0 |
+| `file.metadata.deleted` | `on_file_metadata_deleted` | 5.0.0 |
+| `file.uploaded` | `on_file_uploaded` | 5.0.0 |
+| `file.set.audited` | `on_file_set_audited` | 3.0.0 |
+| `file.set.attached` | `on_file_set_attached` | 3.0.0 |
+| `file.set.url.imported` | `on_file_set_url_imported` | 3.0.0 |
+| `file.set.restored` | `on_file_set_restored` | 3.0.0 |
+| `object.deleted` | `on_object_deleted` | 3.0.0 |
+| `object.failed_deposit` | `on_object_failed_deposit` | 3.0.0 |
+| `object.deposited` | `on_object_deposited` | 3.0.0 |
+| `object.acl.updated` | `on_object_acl_updated` | 3.0.0 |
+| `object.membership.updated` | `on_object_membership_updated` | 3.4.0 |
+| `object.metadata.updated` | `on_object_metadata_updated` | 3.0.0 |
+
+Each event delivers a `Dry::Events::Event` payload. Call `event[:key]` to read a value, or `event.to_h` to convert to a plain hash first (accessing a missing key raises `KeyError`).
+
+<Note>
+Unhandled exceptions inside a listener method short-circuit delivery to subsequent listeners on the same event. Rescue expected failure cases explicitly rather than letting exceptions propagate.
+</Note>
+
+## Built-in listeners
+
+Hyrax registers several listeners automatically on application boot. These power notifications, search indexing, workflow transitions, and trophy cleanup. You can inspect them at runtime:
+
+```ruby listing default listeners
+Hyrax.publisher.default_listeners
+# => [#<Hyrax::Listeners::ACLIndexListener>, #<Hyrax::Listeners::MetadataIndexListener>, ...]
+```
+
+The full set registered out of the box:
+
+- `Hyrax::Listeners::ACLIndexListener`
+- `Hyrax::Listeners::BatchNotificationListener`
+- `Hyrax::Listeners::FileListener`
+- `Hyrax::Listeners::FileMetadataListener`
+- `Hyrax::Listeners::FileSetLifecycleListener`
+- `Hyrax::Listeners::FileSetLifecycleNotificationListener`
+- `Hyrax::Listeners::MemberCleanupListener`
+- `Hyrax::Listeners::MetadataIndexListener`
+- `Hyrax::Listeners::ObjectLifecycleListener`
+- `Hyrax::Listeners::TrophyCleanupListener`
+- `Hyrax::Listeners::WorkflowListener`
+
+## Creating a custom listener
+
+A listener is any Ruby object with public methods named using the `on_<event_name>` convention. You only need to implement the methods for events you care about.
+
+<Steps>
+  <Step title="Generate the scaffold">
+    Run the listeners generator to copy a pre-commented template and a matching initializer into your application:
+
+    ```bash
+    rails generate hyrax:listeners
+    ```
+
+    This creates two files:
+
+    - `app/listeners/hyrax_listener.rb` — your listener class with all event methods stubbed out as comments
+    - `config/initializers/publisher.rb` — a one-line initializer to register the listener (commented out by default)
+  </Step>
+
+  <Step title="Implement the handler methods">
+    Open `app/listeners/hyrax_listener.rb` and uncomment (or add) the methods you need. Each method receives a single `Dry::Events::Event` argument.
+
+    ```ruby app/listeners/hyrax_listener.rb
+    # frozen_string_literal: true
+
+    class HyraxListener
+      # Called when an object is successfully deposited.
+      # event[:object] => the deposited PCDM Object
+      # event[:user]   => the User who performed the deposit
+      def on_object_deposited(event)
+        object = event[:object]
+        user   = event[:user]
+
+        Rails.logger.info(
+          "[deposit] #{object.class}##{object.id} deposited by #{user.email}"
+        )
+
+        AuditTrail.record(
+          action:    'deposited',
+          resource:  object.id.to_s,
+          performed_by: user.id
+        )
+      rescue StandardError => e
+        Rails.logger.error("[deposit listener] #{e.class}: #{e.message}")
+      end
+
+      # Uncomment to handle additional events:
+      # def on_object_metadata_updated(event); end
+      # def on_file_set_audited(event); end
+      # def on_object_deleted(event); end
+    end
+    ```
+
+    <Note>
+      For anything beyond simple side-effects, create a narrowly named class (e.g., `AuditTrailListener`) rather than piling logic into `HyraxListener`. Multiple listener classes can be subscribed simultaneously.
+    </Note>
+  </Step>
+
+  <Step title="Register the listener">
+    Open `config/initializers/publisher.rb` and uncomment the subscribe call:
+
+    ```ruby config/initializers/publisher.rb
+    # frozen_string_literal: true
+
+    Rails.application.reloader.to_prepare do
+      Hyrax.publisher.subscribe(HyraxListener.new)
+    end
+    ```
+
+    Wrapping the call in `reloader.to_prepare` prevents stale class references in development mode, where classes are reloaded on each request.
+  </Step>
+</Steps>
+
+## Subscribing without a generator
+
+If you prefer to register a listener without running the generator, call `Hyrax.publisher.subscribe` directly with an instance of your listener class:
+
+<CodeGroup>
+
+```ruby config/initializers/publisher.rb
+# frozen_string_literal: true
+
+Rails.application.reloader.to_prepare do
+  Hyrax.publisher.subscribe(MyCustomListener.new)
+  Hyrax.publisher.subscribe(AuditTrailListener.new)
+end
+```
+
+```ruby subscribing with a block
+# Blocks work for simple, one-off handlers.
+# Note: you cannot unsubscribe an anonymous block.
+Hyrax.publisher.subscribe('object.deposited') do |event|
+  Rails.logger.info("Deposited: #{event[:object].id}")
+end
+```
+
+</CodeGroup>
+
+To later remove a listener object, call `Hyrax.publisher.unsubscribe(listener_instance)`.
+
+## The Hyrax::Transactions system
+
+Alongside the event bus, Hyrax provides a composable transaction system (`Hyrax::Transactions`) built on [`dry-transaction`](https://dry-rb.org/gems/dry-transaction/) and [`dry-container`](https://dry-rb.org/gems/dry-container/). Transactions orchestrate multi-step operations — creating a work, destroying a file set, updating a collection — and are registered in `Hyrax::Transactions::Container`.
+
+```ruby calling a transaction
+result = Hyrax::Transactions::Container['change_set.create_work'].call(change_set)
+
+result.success? # => true / false
+result.failure  # => the failed step's return value, if any
+```
+
+Transactions and the event bus complement each other: a transaction step can publish an event after completing its work, and listeners react to those events asynchronously (often via background jobs). You can override individual transaction steps by re-registering them in the container inside an initializer, keeping each concern isolated.
+
+<Note>
+  The transactions API was introduced in Hyrax 2.4.0. Earlier versions relied solely on actor stacks; see the actors reference for the legacy approach.
+</Note>
+
+## Related topics
+
+<CardGroup cols={2}>
+  <Card title="Actor stack" icon="layers" href="/reference/actors">
+    The older actor-based pipeline that transactions are progressively replacing. Useful when overriding deposit or update behaviour in pre-transaction code paths.
+  </Card>
+  <Card title="Background jobs" icon="clock" href="/guides/background-jobs">
+    Most listener side-effects should be deferred to background jobs. Learn how Hyrax queues and configures its jobs with Sidekiq or other adapters.
+  </Card>
+</CardGroup>

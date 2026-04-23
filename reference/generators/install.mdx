@@ -1,0 +1,162 @@
+---
+title: "hyrax:install Generator Reference"
+description: "What the hyrax:install Rails generator does, every file it creates or modifies, and the flags available to control its behaviour."
+---
+
+The `hyrax:install` generator bootstraps a new Hyrax application in a single command. It runs a chain of sub-generators that install Blacklight, Hydra::Head, and Devise; inject Hyrax routing and controller behaviour; create database migrations; generate workflow definitions; and set up assets. It is the recommended first step after adding the `hyrax` gem.
+
+## Usage
+
+```bash
+rails generate hyrax:install [MODEL_NAME] [OPTIONS]
+```
+
+`MODEL_NAME` defaults to `user` and is passed to Devise as the user model. You typically do not need to change it.
+
+### Options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--skip-riiif` | `false` | Skip generating the embedded RIIIF image server. Use this when you supply your own external IIIF image server. |
+| `--skip-health-check` | `true` | Skip generating the default `/healthz` endpoint. Pass `--no-skip-health-check` to generate health check routes. |
+
+## What the Generator Does
+
+<Steps>
+  <Step title="Run required sub-generators">
+    Installs Blacklight with Devise (`blacklight:install --devise`), then Hydra::Head (`hydra:head -f`), Hyrax models (`hyrax:models`), and BrowseEverything config (`browse_everything:config`).
+  </Step>
+  <Step title="Patch the application controller layout">
+    Replaces Blacklight's `layout :determine_layout` with Hyrax's `Hyrax::ThemedLayoutController` and sets the default single-column layout.
+  </Step>
+  <Step title="Inject Hyrax routes">
+    Inserts the following after the Devise routes block in `config/routes.rb`:
+
+    ```ruby
+    mount Qa::Engine => '/authorities'
+    mount BlacklightDynamicSitemap::Engine => '/'
+    mount Hyrax::Engine, at: '/'
+    resources :welcome, only: 'index'
+    root 'hyrax/homepage#index'
+    curation_concerns_basic_routes
+    ```
+  </Step>
+  <Step title="Patch SolrDocument">
+    Adds `include Hyrax::SolrDocumentBehavior` to `app/models/solr_document.rb` so Hyrax metadata accessors are available on search results.
+  </Step>
+  <Step title="Patch the Ability class">
+    Inserts `include Hyrax::Ability` and enables the `everyone_can_create_curation_concerns` ability logic into `app/models/ability.rb`.
+  </Step>
+  <Step title="Patch the application controller">
+    Inserts `include Hyrax::Controller` into `app/controllers/application_controller.rb` to enable Hyrax controller helpers.
+  </Step>
+  <Step title="Generate workflow definitions">
+    Creates two JSON workflow configs in `config/workflows/`:
+
+    - `default_workflow.json` — the default one-step deposit workflow
+    - `mediated_deposit_workflow.json` — an optional mediated review workflow
+  </Step>
+  <Step title="Generate the hyrax.rb config initializer">
+    Runs `rails generate hyrax:config` to create `config/initializers/hyrax.rb` with all configurable options and their defaults.
+  </Step>
+  <Step title="Install Mailboxer">
+    Runs `mailboxer:install` to create the notifications database tables used by the Hyrax dashboard.
+  </Step>
+  <Step title="Copy analytics config">
+    Copies `config/analytics.yml` for optional Google Analytics or Matomo integration.
+  </Step>
+  <Step title="Install listeners template">
+    Runs `hyrax:listeners` to scaffold a `config/initializers/hyrax_listeners.rb` example showing how to subscribe to Hyrax events.
+  </Step>
+  <Step title="Copy catalog controller">
+    Copies a Hyrax-aware `CatalogController` to `app/controllers/catalog_controller.rb`, replacing the Blacklight default.
+  </Step>
+  <Step title="Inject search builder filters">
+    Adds `Hydra::AccessControlsEnforcement` and `Hyrax::SearchFilters` into `app/models/search_builder.rb` so search results are scoped to the current user's permissions.
+  </Step>
+  <Step title="Copy the Hyrax helper">
+    Copies `app/helpers/hyrax_helper.rb` with convenience view helpers.
+  </Step>
+  <Step title="Install Hyrax assets">
+    Runs `hyrax:assets` to add Hyrax JavaScript and stylesheet manifests.
+  </Step>
+  <Step title="Enable browser-side form validation">
+    Flips `browser_validations = true` in `config/initializers/simple_form.rb`.
+  </Step>
+  <Step title="Install Blacklight Gallery and DataTables">
+    Runs `blacklight_gallery:install` and injects DataTables JS/CSS into the asset manifests.
+  </Step>
+  <Step title="Initialize the NOID database minter">
+    Runs `noid:rails:install` to create the `noid_rails_minter_states` table for database-backed NOID minting.
+  </Step>
+  <Step title="Set the ActiveJob queue adapter">
+    Inserts the following into `config/application.rb`:
+
+    ```ruby
+    config.active_job.queue_adapter = ENV.fetch('HYRAX_ACTIVE_JOB_QUEUE') { 'async' }.to_sym
+    ```
+  </Step>
+  <Step title="Install UniversalViewer">
+    Runs `hyrax:universal_viewer:install` and `yarn:install` to add the UniversalViewer JavaScript package.
+  </Step>
+  <Step title="Generate the RIIIF image server (unless skipped)">
+    Runs `hyrax:riiif` to mount a local RIIIF-compliant image server for IIIF delivery.
+  </Step>
+  <Step title="Generate health check endpoints (unless skipped)">
+    Runs `hyrax:health_check` to add `/healthz` and `/readyz` routes.
+  </Step>
+  <Step title="Add a Lando dev environment file">
+    Copies `.lando.yml` to the project root for local Docker-based development with [Lando](https://lando.dev).
+  </Step>
+  <Step title="Remove the static robots.txt">
+    Deletes `public/robots.txt` in favour of Hyrax's dynamic robots file generated by `BlacklightDynamicSitemap`.
+  </Step>
+  <Step title="Add dotenv support">
+    Copies a starter `.env` file and adds `gem 'dotenv-rails', '~> 2.8'` to the `development` and `test` gem groups.
+  </Step>
+</Steps>
+
+## Files Created or Modified
+
+<CodeGroup>
+
+```text Created
+config/initializers/hyrax.rb
+config/initializers/hyrax_listeners.rb
+config/workflows/default_workflow.json
+config/workflows/mediated_deposit_workflow.json
+config/analytics.yml
+config/routes.rb (modified)
+app/controllers/application_controller.rb (modified)
+app/controllers/catalog_controller.rb
+app/helpers/hyrax_helper.rb
+app/models/ability.rb (modified)
+app/models/solr_document.rb (modified)
+app/models/search_builder.rb (modified)
+db/seeds.rb (modified)
+.env
+.lando.yml
+```
+
+```text Database Migrations (via sub-generators)
+db/migrate/*_create_sipity_*.rb   (workflow tables)
+db/migrate/*_create_mailboxer_*.rb
+db/migrate/*_create_noid_rails_minter_states.rb
+db/migrate/*_create_hyrax_*.rb   (various Hyrax tables)
+```
+
+</CodeGroup>
+
+## Example: Running the Generator
+
+```bash
+# Install with defaults
+rails generate hyrax:install
+
+# Use a custom user model name and skip the embedded image server
+rails generate hyrax:install admin_user --skip-riiif
+```
+
+<Note>
+  After running `hyrax:install`, run `rails db:migrate` to apply all generated migrations before starting the application.
+</Note>

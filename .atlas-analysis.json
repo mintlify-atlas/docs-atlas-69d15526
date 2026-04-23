@@ -1,28 +1,11 @@
 {
-  "$schema": "https://mintlify.com/docs.json",
-  "name": "Hyrax",
+  "projectType": "framework",
+  "projectName": "Hyrax",
+  "projectDescription": "A Ruby on Rails Engine that provides a foundation for building digital repository applications with flexible metadata, configurable workflows, and IIIF support.",
   "theme": "maple",
-  "colors": {
-    "primary": "#2cb066",
-    "light": "#8cd4ac",
-    "dark": "#e69431"
-  },
-  "favicon": "https://media.brand.dev/1a513dfb-920c-4092-bde1-74e49bbee3ae.png",
-  "logo": {
-    "light": "https://media.brand.dev/603086b6-ff96-48af-909b-2d567727d6b6.png",
-    "dark": "https://media.brand.dev/603086b6-ff96-48af-909b-2d567727d6b6.png"
-  },
-  "navbar": {
-    "primary": {
-      "type": "github",
-      "href": "https://github.com/samvera/hyrax"
-    }
-  },
-  "footer": {
-    "socials": {
-      "github": "https://github.com/samvera/hyrax"
-    }
-  },
+  "primaryColor": "#2cb066",
+  "lightColor": "#8cd4ac",
+  "darkColor": "#e69431",
   "navigation": {
     "tabs": [
       {
@@ -103,5 +86,38 @@
         ]
       }
     ]
-  }
+  },
+  "keyFeatures": [
+    "Customizable work types via Rails generators",
+    "Configurable deposit workflows with Sipity",
+    "Flexible M3-based metadata schemas",
+    "IIIF manifest generation and image serving",
+    "Valkyrie persistence layer with Fedora and PostgreSQL backends",
+    "Administrative dashboard for feature toggles and analytics",
+    "Blacklight-powered search and discovery",
+    "Background job processing for file ingest and derivatives",
+    "Access controls with embargoes and leases",
+    "Proxy deposit and collection management"
+  ],
+  "publicApiSurface": [
+    "Hyrax.config",
+    "Hyrax::Configuration",
+    "Hyrax.persister",
+    "Hyrax.query_service",
+    "Hyrax.metadata_adapter",
+    "Hyrax.storage_adapter",
+    "Hyrax.publisher",
+    "Hyrax::Engine",
+    "Hyrax::Workflow",
+    "Hyrax::VirusScanner",
+    "rails generate hyrax:install",
+    "rails generate hyrax:work_resource",
+    "rails generate hyrax:collection_resource",
+    "Hyrax::WorksControllerBehavior",
+    "Hyrax::CollectionsControllerBehavior",
+    "Hyrax::FileSetsBehavior",
+    "Hyrax::Indexers::PcdmObjectIndexer",
+    "Hyrax::Forms::PcdmObjectForm",
+    "Hyrax::Transactions"
+  ]
 }

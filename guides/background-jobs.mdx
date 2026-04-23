@@ -1,0 +1,197 @@
+---
+title: "Background Job Processing with ActiveJob and Sidekiq"
+description: "Configure ActiveJob-based background processing in Hyrax: file ingest, characterization, derivative generation, fixity checking, and Sidekiq setup."
+---
+
+Hyrax relies heavily on background jobs for resource-intensive operations. File ingest, characterization, derivative generation, fixity checking, and Solr reindexing all run asynchronously via Rails [ActiveJob](https://edgeguides.rubyonrails.org/active_job_basics.html), keeping the web request cycle fast and responsive. You can use any ActiveJob-compatible queue adapter, from the built-in `:inline` adapter for development to a production-grade system like Sidekiq.
+
+## Key jobs
+
+| Job class | Queue | What it does |
+|---|---|---|
+| `CharacterizeJob` | `ingest_queue_name` | Runs FITS characterization on an uploaded file and updates FileSet metadata (MIME type, dimensions, checksum, format label) |
+| `CreateDerivativesJob` | `ingest_queue_name` | Generates thumbnails, PDFs, and transcoded audio/video from the original file using LibreOffice, ImageMagick, and ffmpeg |
+| `FixityCheckJob` | `default` | Contacts Fedora to verify file checksums and records results in `ChecksumAuditLog` |
+| `IngestJob` | `ingest_queue_name` | Stages and ingests an uploaded file into the repository (ActiveFedora path) |
+| `ValkyrieIngestJob` | `ingest_queue_name` | Valkyrie-native equivalent of `IngestJob` for Valkyrie storage adapters |
+| `EmbargoExpiryJob` | `default` | Lifts embargoes on works whose release date has passed |
+| `LeaseExpiryJob` | `default` | Expires active leases on works and updates their visibility |
+
+### CharacterizeJob
+
+`CharacterizeJob` is enqueued automatically after a file is ingested. It uses `Hydra::Works::CharacterizationService` by default, but the service is swappable:
+
+```ruby
+# config/initializers/characterize_job.rb
+class MyCharacterizer
+  def run(file, path, **opts)
+    # custom characterization logic
+  end
+end
+
+CharacterizeJob.characterization_service = MyCharacterizer.new
+```
+
+The characterization tool (FITS local or FITS servlet) is controlled by the `CH12N_TOOL` environment variable or by `Hyrax.config.characterization_options`:
+
+```ruby
+Hyrax.config do |config|
+  # Use the FITS servlet container instead of local fits.sh
+  config.characterization_options = { ch12n_tool: :fits_servlet }
+end
+```
+
+### CreateDerivativesJob
+
+`CreateDerivativesJob` delegates to the derivative services registered in `Hyrax.config.derivative_services`. It skips video derivative generation unless `Hyrax.config.enable_ffmpeg` is `true`. After generation it reindexes the FileSet and, if the FileSet is the parent work's thumbnail, the parent work too.
+
+### FixityCheckJob
+
+`FixityCheckJob` runs against a Fedora content URI (typically a version URI like `.../content/fcr:versions/version1`). It uses `Hyrax.config.fixity_service` and stores results in `ChecksumAuditLog`. The default maximum interval between checks is seven days:
+
+```ruby
+Hyrax.config do |config|
+  config.max_days_between_fixity_checks = 7
+end
+```
+
+## Configuring the queue adapter
+
+<Tabs>
+  <Tab title="Inline (development)">
+    For local development, the `:inline` adapter executes jobs immediately in the foreground — no separate worker process is needed. Set it via the `.env` file:
+
+    ```dotenv
+    # .env
+    HYRAX_ACTIVE_JOB_QUEUE=inline
+    ```
+
+    Or configure it directly in the Rails environment file:
+
+    ```ruby
+    # config/environments/development.rb
+    Rails.application.configure do
+      config.active_job.queue_adapter = :inline
+    end
+    ```
+
+    <Note>
+    The `:inline` adapter processes jobs synchronously during the HTTP request, which makes it easy to debug but will cause slow page loads for large file uploads. Switch to `:async` or Sidekiq as soon as performance matters.
+    </Note>
+  </Tab>
+  <Tab title="Sidekiq (production)">
+    Sidekiq is the recommended queue adapter for production Hyrax applications. It provides a web UI for monitoring queues, retries failed jobs, and scales to multiple worker processes.
+
+    <Steps>
+      <Step title="Add the gem">
+        ```ruby
+        # Gemfile
+        gem 'sidekiq'
+        ```
+
+        ```bash
+        bundle install
+        ```
+      </Step>
+
+      <Step title="Configure ActiveJob to use Sidekiq">
+        ```ruby
+        # config/environments/production.rb
+        Rails.application.configure do
+          config.active_job.queue_adapter = :sidekiq
+        end
+        ```
+      </Step>
+
+      <Step title="Set the ingest queue name">
+        Hyrax routes ingest-related jobs to a dedicated queue. Set its name in the Hyrax initializer:
+
+        ```ruby
+        # config/initializers/hyrax.rb
+        Hyrax.config do |config|
+          config.ingest_queue_name = :hyrax_ingest
+        end
+        ```
+
+        Then configure Sidekiq to process that queue in `config/sidekiq.yml`:
+
+        ```yaml
+        # config/sidekiq.yml
+        :queues:
+          - hyrax_ingest
+          - default
+          - mailers
+        ```
+      </Step>
+
+      <Step title="Start the Sidekiq process">
+        ```bash
+        bundle exec sidekiq -C config/sidekiq.yml
+        ```
+
+        In production, manage Sidekiq with systemd, Foreman, or your deployment tool of choice.
+      </Step>
+    </Steps>
+  </Tab>
+  <Tab title="Test">
+    For RSpec test suites, use the built-in `:test` adapter, which stores enqueued jobs without executing them:
+
+    ```ruby
+    # config/environments/test.rb
+    Rails.application.configure do
+      config.active_job.queue_adapter = :test
+    end
+    ```
+
+    You can then assert on enqueued jobs using `assert_enqueued_with` or the `have_enqueued_job` RSpec matcher from `rspec-rails`.
+  </Tab>
+</Tabs>
+
+## The ingest queue name
+
+The `ingest_queue_name` configuration option controls which queue `CharacterizeJob`, `CreateDerivativesJob`, `IngestJob`, and `ValkyrieIngestJob` are sent to. The default is `:default`:
+
+```ruby
+Hyrax.config do |config|
+  # Route ingest jobs to a dedicated high-throughput queue
+  config.ingest_queue_name = :hyrax_ingest
+end
+```
+
+Separating ingest-heavy jobs onto their own queue lets you run more workers for that queue independently, which is useful during large batch imports.
+
+## Monitoring jobs
+
+Hyrax records job activity in an **Operations** model backed by the database. You can view the status of long-running operations from the admin dashboard under **Repository > Operations**.
+
+For Sidekiq-based setups, mount the Sidekiq web UI for real-time queue visibility:
+
+```ruby
+# config/routes.rb
+require 'sidekiq/web'
+
+Rails.application.routes.draw do
+  # Restrict access to admin users
+  authenticate :user, ->(u) { u.admin? } do
+    mount Sidekiq::Web => '/sidekiq'
+  end
+end
+```
+
+## Starting workers
+
+In development with the `:inline` adapter, no extra process is needed. For other adapters, start the worker alongside your Rails server:
+
+<CodeGroup>
+```bash Sidekiq
+bundle exec sidekiq -C config/sidekiq.yml
+```
+
+```bash Resque
+QUEUE=* bundle exec rake resque:work
+```
+
+```bash Good Job (PostgreSQL-backed)
+bundle exec good_job start
+```
+</CodeGroup>

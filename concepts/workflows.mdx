@@ -1,0 +1,311 @@
+---
+title: "Configuring Deposit Workflows with Sipity"
+description: "How Hyrax uses Sipity-based workflows to mediate deposit review: states, actions, roles, permission templates, and background job triggers."
+---
+
+Hyrax uses the [Sipity](https://github.com/ndlib/sipity) workflow engine to route deposited works through configurable review and publication processes. Rather than treating deposit as a single atomic event, a workflow models the lifecycle of a work as a series of discrete **states** connected by **actions** that authorized **roles** can take. When a user deposits a work, a `Sipity::Entity` proxy is created for that work and placed into the workflow's initial state. Reviewers can then take actions — approve, request changes, withdraw — that move the entity to new states and optionally trigger notifications, permission changes, or other side effects. Workflows are scoped to administrative sets, meaning different sets of works can follow entirely different review processes within a single Hyrax instance.
+
+## Core Sipity models
+
+<CardGroup cols={2}>
+  <Card title="Sipity::Workflow" icon="diagram-project">
+    A named workflow belonging to a `Hyrax::PermissionTemplate`. Has many states, actions, and roles. Only one workflow per permission template may be active at a time.
+  </Card>
+  <Card title="Sipity::Entity" icon="box">
+    A proxy for a repository object (work) within the workflow. Holds a reference to the current `Sipity::WorkflowState` and is located via its `proxy_for_global_id`.
+  </Card>
+  <Card title="Sipity::WorkflowState" icon="circle-dot">
+    A named state within a workflow (e.g., `deposited`, `pending_review`, `changes_required`). Entities move between states by taking actions.
+  </Card>
+  <Card title="Sipity::WorkflowAction" icon="arrow-right">
+    A named action that can be taken within a workflow. May transition the entity to a new state and trigger notification callbacks via `triggered_methods`.
+  </Card>
+</CardGroup>
+
+### How a Sipity::Entity is created
+
+When a work is deposited, a `Sipity::Entity` is created as a proxy that represents the work in the workflow engine. It avoids coupling workflow state to the work's own attributes:
+
+```ruby
+# app/models/sipity/entity.rb
+class Entity < ActiveRecord::Base
+  belongs_to :workflow,       class_name: 'Sipity::Workflow'
+  belongs_to :workflow_state, class_name: 'Sipity::WorkflowState', optional: true
+
+  # The work this entity proxies, accessed via GlobalID
+  def proxy_for
+    @proxy_for ||= GlobalID::Locator.locate(proxy_for_global_id)
+  end
+
+  def workflow_state_name
+    workflow_state&.name
+  end
+end
+```
+
+### Workflow actions and state transitions
+
+A `Sipity::WorkflowAction` may or may not change state. Commenting on a work in review is an action that does not advance state, while approving it is an action that transitions the entity to the `deposited` state. Actions also carry `triggered_methods` — arbitrary callables that fire when the action is taken:
+
+```ruby
+# app/models/sipity/workflow_action.rb
+class WorkflowAction < ActiveRecord::Base
+  belongs_to :workflow
+  belongs_to :resulting_workflow_state, optional: true, class_name: 'Sipity::WorkflowState'
+
+  # In what states can this action be taken?
+  has_many :workflow_state_actions, class_name: 'Sipity::WorkflowStateAction'
+
+  # Arbitrary callables (e.g., send email, update ACLs)
+  has_many :triggered_methods, class_name: 'Sipity::Method'
+end
+```
+
+## The permission template connection
+
+Every admin set has exactly one `Hyrax::PermissionTemplate`. The permission template is the bridge between the admin set and its associated workflows:
+
+```ruby
+# app/models/hyrax/permission_template.rb
+class PermissionTemplate < ActiveRecord::Base
+  # The admin set or collection this template governs
+  has_many :available_workflows, class_name: 'Sipity::Workflow', dependent: :destroy
+  has_one  :active_workflow,
+           -> { where(active: true) },
+           class_name: 'Sipity::Workflow',
+           foreign_key: :permission_template_id
+
+  has_many :access_grants, class_name: 'Hyrax::PermissionTemplateAccess', dependent: :destroy
+end
+```
+
+Finding the active workflow for an admin set:
+
+```ruby
+workflow = Sipity::Workflow.find_active_workflow_for(admin_set_id: admin_set.id)
+```
+
+## Workflow configuration format
+
+Workflows are defined as JSON files placed in `config/workflows/*.json`. When an admin set is created, Hyrax imports all files matching this glob via `Hyrax::Workflow::WorkflowImporter`:
+
+```ruby
+# app/services/hyrax/workflow/workflow_importer.rb
+class_attribute :path_to_workflow_files
+self.path_to_workflow_files = Rails.root.join('config', 'workflows', '*.json')
+```
+
+### The default workflow
+
+The simplest workflow ships as `config/workflows/default_workflow.json`. It has a single `deposit` action with no starting state, transitioning directly to `deposited`:
+
+```json
+{
+  "workflows": [
+    {
+      "name": "default",
+      "label": "Default workflow",
+      "description": "A single submission step, default workflow",
+      "allows_access_grant": true,
+      "actions": [
+        {
+          "name": "deposit",
+          "from_states": [],
+          "transition_to": "deposited",
+          "methods": [
+            "Hyrax::Workflow::GrantEditToDepositor",
+            "Hyrax::Workflow::ActivateObject"
+          ]
+        }
+      ]
+    }
+  ]
+}
+```
+
+On deposit, two built-in workflow methods are called:
+
+- `Hyrax::Workflow::GrantEditToDepositor` — grants the depositing user edit access to the work.
+- `Hyrax::Workflow::ActivateObject` — sets `work.state` to `Hyrax::ResourceStatus::ACTIVE`, making the work publicly visible according to its visibility setting.
+
+```ruby
+# app/services/hyrax/workflow/activate_object.rb
+module ActivateObject
+  def self.call(target:, **)
+    target.state = Hyrax::ResourceStatus::ACTIVE
+  end
+end
+```
+
+### A multi-step mediated deposit workflow
+
+To require review before publication, define additional states and actions. The JSON below sketches a three-state mediated deposit workflow with `depositing`, `pending_review`, and `deposited` states:
+
+```json
+{
+  "workflows": [
+    {
+      "name": "mediated_deposit",
+      "label": "Mediated deposit",
+      "description": "Requires reviewer approval before publication",
+      "allows_access_grant": false,
+      "actions": [
+        {
+          "name": "deposit",
+          "from_states": [],
+          "transition_to": "pending_review",
+          "notifications": [
+            {
+              "notification_type": "email",
+              "name": "Hyrax::Workflow::PendingReviewNotification",
+              "to": ["reviewer"]
+            }
+          ],
+          "methods": [
+            "Hyrax::Workflow::RevokeEditFromDepositor"
+          ]
+        },
+        {
+          "name": "approve",
+          "from_states": [{ "names": ["pending_review"], "roles": ["approving"] }],
+          "transition_to": "deposited",
+          "methods": [
+            "Hyrax::Workflow::GrantEditToDepositor",
+            "Hyrax::Workflow::ActivateObject"
+          ],
+          "notifications": [
+            {
+              "notification_type": "email",
+              "name": "Hyrax::Workflow::DepositedNotification",
+              "to": ["depositor"]
+            }
+          ]
+        },
+        {
+          "name": "request_changes",
+          "from_states": [{ "names": ["pending_review"], "roles": ["approving"] }],
+          "transition_to": "changes_required",
+          "notifications": [
+            {
+              "notification_type": "email",
+              "name": "Hyrax::Workflow::ChangesRequiredNotification",
+              "to": ["depositor"]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
+```
+
+## Workflow roles
+
+Roles in Sipity are separate from system groups. A `Sipity::Role` (stored in `sipity_roles`) represents a responsibility within a workflow — what someone does, not who they are:
+
+```ruby
+# app/models/sipity/role.rb
+class Role < ActiveRecord::Base
+  # Roles are verbs — they represent what someone does.
+  # Examples: "depositing", "reviewing", "approving"
+
+  def self.[](name)
+    find_or_create_by!(name: name.to_s)
+  end
+
+  # Registered roles (those defined in Hyrax.config) cannot be destroyed.
+  before_destroy :prevent_registered_roles_from_being_destroyed
+end
+```
+
+Roles are assigned to users or groups at the workflow level (`Sipity::WorkflowRole`) or at the entity level (`Sipity::EntitySpecificResponsibility`). Entity-specific responsibilities allow one-off role grants — for example, giving a specific user the reviewing role for a single work.
+
+## Activating a workflow
+
+When you create a new admin set and want to use a specific workflow, activate it against the permission template.
+
+<Steps>
+  <Step title="Import workflow definitions">
+    Load all workflow JSON files from `config/workflows/*.json` for the new permission template.
+
+    ```ruby
+    Hyrax::Workflow::WorkflowImporter.load_workflow_for(permission_template: template)
+    ```
+  </Step>
+  <Step title="Activate the workflow">
+    Mark one workflow as active. Only one workflow per permission template may be active at a time.
+
+    ```ruby
+    # Activate by name
+    Sipity::Workflow.activate!(
+      permission_template: template,
+      workflow_name: 'mediated_deposit'
+    )
+    ```
+  </Step>
+  <Step title="Assign workflow roles">
+    Grant users or groups the appropriate Sipity roles (e.g., `approving`, `reviewing`) for this workflow via the admin dashboard or programmatically.
+
+    ```ruby
+    workflow = template.active_workflow
+    approving_role = Sipity::Role['approving']
+    Hyrax::Workflow::PermissionGenerator.call(
+      roles: approving_role,
+      workflow: workflow,
+      agents: [reviewer_user]
+    )
+    ```
+  </Step>
+</Steps>
+
+<Note>
+  You can also configure workflows directly from the Hyrax admin dashboard at **Admin &rarr; Administrative Sets**, without writing code.
+</Note>
+
+<Warning>
+Only one workflow per permission template can be active at a time. Activating a new workflow deactivates the current one. Works already in progress retain their existing `Sipity::Entity` and workflow state — they are not automatically migrated to the new workflow.
+</Warning>
+
+## Background jobs triggered by workflow actions
+
+When a workflow action is taken via `Hyrax::Workflow::WorkflowActionService`, Hyrax fires the action's `triggered_methods` and delivers notifications. These are the primary built-in callables:
+
+<AccordionGroup>
+  <Accordion title="Hyrax::Workflow::ActivateObject">
+    Sets `work.state = Hyrax::ResourceStatus::ACTIVE`. Works in the active state are visible to users according to their visibility setting (public, authenticated, etc.).
+  </Accordion>
+  <Accordion title="Hyrax::Workflow::DeactivateObject">
+    Sets `work.state` to the Fedora inactive status URI. Deactivated works are hidden from public discovery even if their ACLs would otherwise permit access.
+  </Accordion>
+  <Accordion title="Hyrax::Workflow::GrantEditToDepositor">
+    Adds the depositor back to the work's edit access list. Typically called when a work is approved or when changes are returned to the depositor.
+  </Accordion>
+  <Accordion title="Hyrax::Workflow::RevokeEditFromDepositor">
+    Removes the depositor from the work's edit access list. Called during review so the depositor cannot modify a work currently under review.
+  </Accordion>
+  <Accordion title="Hyrax::Workflow::GrantReadToDepositor">
+    Grants the depositor read-only access to their own work. Used in workflows where the depositor's edit rights are revoked during review but they still need to see the work.
+  </Accordion>
+</AccordionGroup>
+
+Notifications (`Hyrax::Workflow::AbstractNotification` subclasses) are delivered to recipients via the `Mailboxer` gem and optionally broadcast over ActionCable via `StreamNotificationsJob`.
+
+## Checking workflow state from code
+
+```ruby
+# Get the Sipity::Entity for a work
+entity = Sipity::Entity(work)
+
+# Read the current state
+entity.workflow_state_name  # => "pending_review"
+entity.workflow_name        # => "mediated_deposit"
+
+# Find all works in a given state for an admin set
+workflow = Sipity::Workflow.find_active_workflow_for(admin_set_id: admin_set.id)
+state    = workflow.workflow_states.find_by!(name: 'pending_review')
+entities = state.entities
+```
+
+<Tip>
+The Hyrax admin dashboard at `/admin/workflows` provides a UI for managing workflow submissions, taking actions, and leaving comments without writing code.
+</Tip>

@@ -1,0 +1,255 @@
+---
+title: "Deploying a Hyrax Application to Production"
+description: "Production deployment for Hyrax-based apps: web server, Sidekiq workers, PostgreSQL, Solr, Fedora, shared file storage, Helm chart, and fixity checking."
+---
+
+Deploying a Hyrax-based application to production requires careful configuration of several interdependent services. This page covers the recommended stack components, relevant environment variables drawn from `Hyrax::Configuration`, and the available Kubernetes Helm chart for container-based deployments.
+
+## Web server
+
+The official Docker image (`hyrax-base`) starts Puma by default:
+
+```bash
+CMD ["bundle", "exec", "puma", "-v", "-b", "tcp://0.0.0.0:3000"]
+```
+
+Puma is the recommended web server for production. Run it behind a reverse proxy (nginx or Apache) that handles TLS termination and serves static assets.
+
+<Warning>
+  Hyrax's realtime notifications use WebSockets. If you place the application behind **Apache + Phusion Passenger**, WebSocket support is unavailable and `Hyrax.config.realtime_notifications` is automatically coerced to `false`. Use nginx with Passenger or a standalone Puma process instead.
+</Warning>
+
+Configure Puma's concurrency to match your server's CPU count and available memory. A typical `config/puma.rb` for production:
+
+```ruby
+workers ENV.fetch("WEB_CONCURRENCY", 2).to_i
+threads_count = ENV.fetch("RAILS_MAX_THREADS", 5).to_i
+threads threads_count, threads_count
+
+preload_app!
+
+on_worker_boot do
+  ActiveRecord::Base.establish_connection if defined?(ActiveRecord)
+end
+```
+
+## Background workers
+
+Hyrax offloads resource-intensive work to ActiveJob, including file ingest, derivative generation, characterization, fixity checking, and Solr indexing. In production you must run a persistent worker process.
+
+**Sidekiq** (backed by Redis) is the recommended adapter.
+
+<Steps>
+  <Step title="Add Sidekiq to your Gemfile">
+    ```ruby
+    gem 'sidekiq'
+    ```
+  </Step>
+  <Step title="Configure ActiveJob to use Sidekiq">
+    ```ruby
+    # config/application.rb
+    config.active_job.queue_adapter = :sidekiq
+    ```
+  </Step>
+  <Step title="Set the Redis namespace">
+    ```bash
+    HYRAX_REDIS_NAMESPACE=hyrax   # default: "hyrax"
+    ```
+
+    This maps to `Hyrax.config.redis_namespace` and scopes all Hyrax keys in Redis.
+  </Step>
+  <Step title="Start the worker process">
+    Using the published Docker worker image:
+
+    ```bash
+    docker run --rm \
+      --env-file .env.production \
+      ghcr.io/samvera/hyrax/hyrax-worker:$HYRAX_VERSION \
+      bundle exec sidekiq
+    ```
+
+    The `hyrax-worker-base` image sets `CMD ["bundle", "exec", "sidekiq"]` by default.
+  </Step>
+</Steps>
+
+<Note>
+  The worker container needs access to the same shared volumes as the web container — specifically the derivatives, uploads, and branding paths — so that files written by the web process are readable by the worker and vice versa.
+</Note>
+
+## Database
+
+PostgreSQL is the recommended RDBMS. Set the `DATABASE_URL` environment variable to point at your production database:
+
+```bash
+DATABASE_URL=postgresql://hyrax_user:secret@db-host:5432/hyrax_production
+```
+
+Run migrations after each deployment:
+
+```bash
+bundle exec rails db:migrate
+```
+
+On first deployment also seed the database to create default collection types and workflows:
+
+```bash
+bundle exec rails db:seed
+```
+
+## Solr configuration
+
+Hyrax uses Solr for full-text search and metadata indexing. Point `SOLR_URL` at your production Solr instance and ensure the core is configured with Hyrax's schema (see `.dassie/solr/` or `.koppie/solr/` for the configset).
+
+Key Hyrax Solr settings you can tune in `config/initializers/hyrax.rb`:
+
+```ruby
+Hyrax.config do |config|
+  # Rows returned per request when iterating over all objects
+  config.solr_rows_per_request = 1_000   # default: 1_000
+
+  # Hard cap on results returned in a single query
+  config.solr_max_results = 10_000       # default: 10_000
+
+  # HTTP method used for Solr queries
+  config.solr_default_method = :post     # default: :post
+end
+```
+
+## Fedora Commons configuration
+
+Hyrax supports two storage backends:
+
+- **ActiveFedora** — connects to Fedora 4 (>= 4.7.6) via the `active_fedora` gem
+- **Valkyrie Fedora adapter** — connects to Fedora 6 (>= 6.5.1) via the `valkyrie-fedora` adapter
+
+Set `FEDORA_URL` (ActiveFedora) or the Valkyrie adapter configuration in `config/initializers/valkyrie.rb` to point at your Fedora instance.
+
+To opt in to Valkyrie storage without ActiveFedora, disable Wings:
+
+```bash
+HYRAX_SKIP_WINGS=true
+```
+
+## File storage
+
+Hyrax requires writable local paths for several types of files. All paths have corresponding environment variables:
+
+| Purpose | Environment variable | Default |
+|---|---|---|
+| Derivative files | `HYRAX_DERIVATIVES_PATH` | `Rails.root/tmp/derivatives` |
+| Upload staging area | `HYRAX_UPLOAD_PATH` | `Rails.root/tmp/uploads` |
+| Logos and banners | `HYRAX_BRANDING_PATH` | `Rails.root/public/branding` |
+| FITS executable | `HYRAX_FITS_PATH` | `fits.sh` |
+| ffmpeg executable | `HYRAX_FFMPEG_PATH` | `ffmpeg` |
+
+In a multi-process or containerized deployment these paths must be on a **shared filesystem** accessible to all web and worker containers simultaneously (e.g. an NFS mount or an EFS volume in AWS).
+
+### Using S3 or other cloud storage via Valkyrie
+
+Valkyrie storage adapters allow you to replace local disk storage with cloud object storage. Configure adapters in `config/initializers/valkyrie.rb`:
+
+```ruby
+Valkyrie::StorageAdapter.register(
+  Valkyrie::Storage::Disk.new(base_path: ENV.fetch('HYRAX_DERIVATIVES_PATH')),
+  :derivatives_disk
+)
+```
+
+To switch the derivatives adapter to S3 (using `valkyrie-shrine-storage` or a compatible gem):
+
+```ruby
+Hyrax.config do |config|
+  config.derivatives_storage_adapter = :derivatives_s3
+  config.branding_storage_adapter    = :branding_s3
+end
+```
+
+## Environment variables reference
+
+```bash
+# Storage paths
+HYRAX_DERIVATIVES_PATH=/data/derivatives
+HYRAX_UPLOAD_PATH=/data/uploads
+HYRAX_BRANDING_PATH=/data/branding
+
+# System tool paths
+HYRAX_FITS_PATH=/app/fits/fits.sh
+HYRAX_FFMPEG_PATH=/usr/bin/ffmpeg
+
+# Redis
+HYRAX_REDIS_NAMESPACE=hyrax
+
+# Valkyrie
+HYRAX_SKIP_WINGS=true          # disable ActiveFedora compatibility layer
+HYRAX_VALKYRIE=true            # enable Valkyrie storage
+VALKYRIE_TRANSITION=true       # enable incremental Wings-to-Valkyrie migration
+
+# Rails
+RAILS_ENV=production
+SECRET_KEY_BASE=<long-random-string>
+DATABASE_URL=postgresql://user:pass@host:5432/dbname
+SOLR_URL=http://solr-host:8983/solr/hyrax
+```
+
+## Kubernetes with Helm
+
+A Helm chart for Kubernetes deployments is maintained in the `chart/hyrax` directory of the Hyrax repository. It provides a configurable production-grade deployment of the full Hyrax stack.
+
+<Steps>
+  <Step title="Ensure your cluster is reachable">
+    ```bash
+    kubectl cluster-info
+    ```
+  </Step>
+  <Step title="Fetch chart dependencies">
+    ```bash
+    helm dependency update chart/hyrax
+    ```
+  </Step>
+  <Step title="Install the chart">
+    ```bash
+    helm install -n hyrax \
+      --set image.tag=$(git rev-parse HEAD) \
+      dassie chart/hyrax
+    ```
+  </Step>
+</Steps>
+
+Override chart values with `-f my-values.yaml` to set replica counts, resource limits, image tags, storage class names, and environment variables for your cluster.
+
+## SSL/TLS considerations
+
+Always terminate TLS at the edge (load balancer or ingress controller) and proxy plain HTTP to the Puma process. Set the following to enable secure cookies and correct URL generation:
+
+```bash
+RAILS_FORCE_SSL=false       # TLS is terminated at the proxy, not Rails
+RAILS_RELATIVE_URL_ROOT=/   # set if app is mounted at a sub-path
+```
+
+In `config/environments/production.rb`:
+
+```ruby
+config.force_ssl = false   # handled upstream
+config.assume_ssl = true   # tells Rails to generate https:// URLs
+```
+
+## Fixity checking
+
+Hyrax's fixity checking verifies stored file checksums on a scheduled basis. Configure the maximum allowed gap between checks:
+
+```ruby
+Hyrax.config do |config|
+  # Maximum number of days between fixity checks for a given file
+  config.max_days_between_fixity_checks = 7   # default: 7
+end
+```
+
+Schedule the fixity job with a cron tool (e.g. whenever, Sidekiq-Cron, or Kubernetes CronJob):
+
+```bash
+bundle exec rails hyrax:fixity:check_files
+```
+
+<Warning>
+  In large repositories, fixity checking can be resource-intensive. Run it during off-peak hours and ensure the worker has access to all storage paths.
+</Warning>

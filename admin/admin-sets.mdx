@@ -1,0 +1,137 @@
+---
+title: "Managing Administrative Sets and Deposit Workflows"
+description: "How to create Hyrax administrative sets, attach Sipity workflows via permission templates, and control who can deposit or manage each set."
+---
+
+An administrative set is an organisational container that every work in Hyrax must belong to. Unlike collections — which are user-facing groupings — admin sets exist to enforce repository policy: they determine which approval workflow a deposited work enters, who is permitted to deposit to that set, and who can manage or view its contents. Each work belongs to exactly one admin set.
+
+## The default admin set
+
+Hyrax creates a default admin set during database seeding. It is used automatically whenever the `assign_admin_set` feature is disabled or when a depositor does not choose a specific set.
+
+```bash
+bundle exec rails hyrax:default_admin_set:create
+# or, as part of initial setup:
+bundle exec rails db:seed
+```
+
+Hyrax resolves the default admin set via `Hyrax.config.default_admin_set_id`, which delegates to `Hyrax::AdminSetCreateService.find_or_create_default_admin_set`. You can override the configured default active workflow name used when admin sets are created:
+
+```ruby config/initializers/hyrax.rb
+Hyrax.config do |config|
+  # The Sipity workflow to activate on newly created admin sets.
+  # Must match a workflow name loaded from your workflows JSON file.
+  config.default_active_workflow_name = 'default'
+end
+```
+
+<Note>
+  Changing `default_active_workflow_name` only affects admin sets created after the change. Existing admin sets retain their currently active workflow.
+</Note>
+
+## Creating an admin set
+
+<Steps>
+  <Step title="Sign in as an admin">
+    Navigate to `/dashboard`. You must hold the admin role to create admin sets. See [Users and roles](/admin/users-and-roles) for instructions on granting the admin role.
+  </Step>
+  <Step title="Open the admin sets list">
+    In the dashboard sidebar, navigate to **Collections**. Admin sets and user collections are listed together. Click **New Admin Set** to open the creation form.
+  </Step>
+  <Step title="Fill in the title and description">
+    Enter a human-readable title and an optional description. These fields are stored as `title` and `description` attributes on the `Hyrax::AdministrativeSet` Valkyrie resource.
+  </Step>
+  <Step title="Save and configure permissions">
+    After saving, Hyrax redirects to the edit form where you can configure participants and attach a workflow. A `PermissionTemplate` record is created automatically and linked to the new admin set via `source_id`.
+  </Step>
+</Steps>
+
+## Permission templates
+
+Every admin set has exactly one `Hyrax::PermissionTemplate`. The template acts as the policy record: it stores the active workflow, default embargo settings, and visibility constraints, and it grants authority via `Hyrax::PermissionTemplateAccess` records.
+
+### Access levels
+
+Three access levels can be granted to users or groups:
+
+| Access | Constant | Effect |
+|---|---|---|
+| `manage` | `Hyrax::PermissionTemplateAccess::MANAGE` | Full control: edit admin set, approve works, change workflow |
+| `deposit` | `Hyrax::PermissionTemplateAccess::DEPOSIT` | Submit works to the admin set |
+| `view` | `Hyrax::PermissionTemplateAccess::VIEW` | Read-only access to the admin set |
+
+`manage` and `deposit` grants are reflected in the edit form's **Participants** tab. Grants can also be created programmatically:
+
+<CodeGroup>
+
+```ruby Grant a user deposit access
+template = Hyrax::PermissionTemplate.find_by!(source_id: admin_set.id.to_s)
+
+Hyrax::PermissionTemplateAccess.create!(
+  permission_template: template,
+  agent_type: Hyrax::PermissionTemplateAccess::USER,
+  agent_id: user.user_key,
+  access: Hyrax::PermissionTemplateAccess::DEPOSIT
+)
+```
+
+```ruby Grant a group manage access
+template = Hyrax::PermissionTemplate.find_by!(source_id: admin_set.id.to_s)
+
+Hyrax::PermissionTemplateAccess.create!(
+  permission_template: template,
+  agent_type: Hyrax::PermissionTemplateAccess::GROUP,
+  agent_id: 'curators',
+  access: Hyrax::PermissionTemplateAccess::MANAGE
+)
+```
+
+</CodeGroup>
+
+<Warning>
+  Every admin set must have at least one manager. Removing all manager grants leaves the admin set uncontrollable through the UI. Always verify that at least one user or group retains `manage` access before bulk-removing participants.
+</Warning>
+
+## Attaching a workflow
+
+Workflows are attached to an admin set through its permission template. The **Workflow** tab on the admin set edit page (`/admin/admin_sets/:id/edit`) lists all registered Sipity workflows and lets you select the active one.
+
+When a workflow is activated, Hyrax marks the selected `Sipity::Workflow` record as `active: true` and deactivates any previously active workflow on the same template. Works deposited after the change enter the new workflow; in-progress works remain in their current state.
+
+```ruby Inspect the active workflow in Ruby
+template = Hyrax::PermissionTemplate.find_by!(source_id: admin_set.id.to_s)
+puts template.active_workflow.name
+# => "one_step_mediated_deposit"
+
+# List all workflows available to this admin set
+template.available_workflows.map(&:name)
+# => ["default", "one_step_mediated_deposit"]
+```
+
+## Querying works in an admin set
+
+Because the relationship is stored on the work (via `:admin_set_id`), use an inverse reference query to retrieve members:
+
+```ruby
+works = Hyrax.query_service.find_inverse_references_by(
+  id: admin_set.id,
+  property: :admin_set_id
+)
+```
+
+## Release and embargo defaults
+
+The permission template can enforce embargo behaviour for all works deposited through the admin set. Set `release_period` on the template to one of the predefined constants:
+
+| Constant | Value | Meaning |
+|---|---|---|
+| `RELEASE_TEXT_VALUE_NO_DELAY` | `'now'` | No embargo allowed; works must be released immediately |
+| `RELEASE_TEXT_VALUE_FIXED` | `'fixed'` | All works must use a specific release date |
+| `RELEASE_TEXT_VALUE_6_MONTHS` | `'6mos'` | Maximum embargo of 6 months |
+| `RELEASE_TEXT_VALUE_1_YEAR` | `'1yr'` | Maximum embargo of 1 year |
+| `RELEASE_TEXT_VALUE_2_YEARS` | `'2yrs'` | Maximum embargo of 2 years |
+| `RELEASE_TEXT_VALUE_3_YEARS` | `'3yrs'` | Maximum embargo of 3 years |
+
+<Note>
+  When `release_max_embargo?` is true, `template.release_date` dynamically returns today's date plus the embargo period, not a stored date.
+</Note>

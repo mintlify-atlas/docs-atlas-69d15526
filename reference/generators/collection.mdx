@@ -1,0 +1,154 @@
+---
+title: "hyrax:collection_resource Generator"
+description: "Generate a custom Valkyrie-native collection type with hyrax:collection_resource: model, indexer, form, metadata config, and specs."
+---
+
+The `hyrax:collection_resource` generator scaffolds a custom Valkyrie-native collection class for your Hyrax application. The generated class extends `Hyrax::PcdmCollection` and replaces the default `Hyrax::PcdmCollection` throughout the application by updating `config.collection_model` in the Hyrax initializer.
+
+<Note>
+  The name `Collection` is reserved and will raise an error. Choose a descriptive name such as `LibraryCollection`, `ArchivalSeries`, or `CuratedSet`.
+</Note>
+
+## Usage
+
+```bash
+rails generate hyrax:collection_resource NAME [with_basic_metadata]
+```
+
+Pass the optional `with_basic_metadata` argument (literally the string `with_basic_metadata`) to include the standard Dublin Core basic metadata schema (`title`, `creator`, `description`, etc.) in the generated model, form, and indexer.
+
+## What the Generator Creates
+
+The generator creates the following files and makes one modification to your Hyrax initializer:
+
+| File | Description |
+|------|-------------|
+| `app/models/[name].rb` | Collection model extending `Hyrax::PcdmCollection` |
+| `app/forms/[name]_form.rb` | Form extending `Hyrax::Forms::PcdmCollectionForm` |
+| `app/indexers/[name]_indexer.rb` | Indexer extending `Hyrax::Indexers::PcdmCollectionIndexer` |
+| `config/metadata/[name].yaml` | Metadata YAML for custom fields |
+| `spec/models/[name]_spec.rb` | Model spec (RSpec only) |
+| `spec/forms/[name]_form_spec.rb` | Form spec (RSpec only) |
+| `spec/indexers/[name]_indexer_spec.rb` | Indexer spec (RSpec only) |
+| `config/initializers/hyrax.rb` | Modified: sets `config.collection_model = 'Name'` |
+
+## Generated File Examples
+
+<CodeGroup>
+
+```ruby Model (app/models/library_collection.rb)
+# frozen_string_literal: true
+
+# Generated via
+#  `rails generate hyrax:collection_resource LibraryCollection with_basic_metadata`
+class LibraryCollection < Hyrax::PcdmCollection
+  # Metadata schemas are conditionally included based on
+  # config.collection_include_metadata?
+  #
+  # To add fields, extend config/metadata/library_collection.yaml.
+  # To remove basic metadata, comment out the :basic_metadata schema
+  # include and update the form and indexer accordingly.
+  #
+  if Hyrax.config.collection_include_metadata?
+    include Hyrax::Schema(:basic_metadata)
+    include Hyrax::Schema(:collection_resource)
+    include Hyrax::Schema(:library_collection)
+  end
+end
+```
+
+```ruby Indexer (app/indexers/library_collection_indexer.rb)
+# frozen_string_literal: true
+
+# Generated via
+#  `rails generate hyrax:collection_resource LibraryCollection with_basic_metadata`
+class LibraryCollectionIndexer < Hyrax::Indexers::PcdmCollectionIndexer
+  if Hyrax.config.collection_include_metadata?
+    include Hyrax::Indexer(:basic_metadata) if Hyrax.config.collection_include_metadata?
+    include Hyrax::Indexer(:library_collection)
+  end
+
+  check_if_flexible(LibraryCollection)
+end
+```
+
+```ruby Form (app/forms/library_collection_form.rb)
+# frozen_string_literal: true
+
+# Generated via
+#  `rails generate hyrax:collection_resource LibraryCollection with_basic_metadata`
+class LibraryCollectionForm < Hyrax::Forms::PcdmCollectionForm
+  if Hyrax.config.collection_include_metadata?
+    include Hyrax::FormFields(:basic_metadata) if Hyrax.config.collection_include_metadata?
+    include Hyrax::FormFields(:library_collection)
+  end
+  check_if_flexible(LibraryCollection)
+end
+```
+
+```yaml Metadata config (config/metadata/library_collection.yaml)
+# config/metadata/library_collection.yaml
+# Add application-specific collection fields here.
+# Do NOT edit basic_metadata.yaml directly — it is shared with works.
+attributes: {}
+```
+
+</CodeGroup>
+
+## Customizing the Collection Resource
+
+### Adding Custom Fields
+
+Add fields to `config/metadata/library_collection.yaml`:
+
+```yaml
+attributes:
+  finding_aid_url:
+    type: string
+    multiple: false
+    index_keys:
+      - "finding_aid_url_ssi"
+    form:
+      required: false
+      primary: true
+  repository_location:
+    type: string
+    multiple: true
+    index_keys:
+      - "repository_location_tesim"
+      - "repository_location_sim"
+```
+
+### Removing Basic Metadata
+
+If you generated with `with_basic_metadata` but want to exclude the default Dublin Core fields, comment out the `Hyrax::Schema(:basic_metadata)` include in the model and remove the corresponding includes from the form and indexer:
+
+```ruby
+# app/models/library_collection.rb
+class LibraryCollection < Hyrax::PcdmCollection
+  if Hyrax.config.collection_include_metadata?
+    # include Hyrax::Schema(:basic_metadata)  # removed
+    include Hyrax::Schema(:collection_resource)
+    include Hyrax::Schema(:library_collection)
+  end
+end
+```
+
+### Registering as the Application Collection Model
+
+The generator automatically inserts the following into `config/initializers/hyrax.rb`:
+
+```ruby
+# Injected via `rails g hyrax:collection_resource LibraryCollection`
+config.collection_model = 'LibraryCollection'
+```
+
+This makes all Hyrax queries, controllers, and forms use your custom collection class instead of `Hyrax::PcdmCollection`.
+
+## Reverting
+
+```bash
+rails destroy hyrax:collection_resource LibraryCollection
+```
+
+This removes the generated files and reverts the `config.collection_model` change in the initializer.

@@ -1,97 +1,90 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
+title: "Hyrax: Digital Repository Framework for Rails"
+description: "Hyrax is a Ruby on Rails Engine by the Samvera community that provides a foundation for building full-featured digital repository applications."
 ---
 
-## Setting up
+Hyrax is a [Ruby on Rails Engine](https://guides.rubyonrails.org/engines.html) built by the [Samvera community](https://samvera.org). It gives you a head start building digital repository applications — providing works, collections, configurable deposit workflows, flexible metadata, IIIF support, and an administrative dashboard out of the box. You mount Hyrax inside your own Rails application and customize it to fit your institution's needs.
 
-Get your documentation site up and running in minutes.
-
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
-
-## Make it yours
-
-Design a docs site that looks great and empowers your users.
-
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
+<CardGroup cols={2}>
+  <Card title="Quick Start" icon="rocket" href="/quickstart">
+    Generate a new Hyrax-based application and get it running in minutes.
   </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
+  <Card title="Installation" icon="wrench" href="/installation">
+    Step-by-step guide to installing prerequisites and setting up your app.
   </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
+  <Card title="Core Concepts" icon="book" href="/concepts/works-and-filesets">
+    Understand works, file sets, collections, workflows, and permissions.
   </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
+  <Card title="Configuration Reference" icon="gear" href="/reference/configuration">
+    Explore every configuration option exposed by Hyrax.
   </Card>
-</Columns>
+</CardGroup>
 
-## Create beautiful pages
+## What Hyrax provides
 
-Everything you need to create world-class documentation.
+Hyrax bundles everything you need to operate a digital repository:
 
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
-  </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
-  </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
-  </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
-  </Card>
-</Columns>
+- **Work types** — Generate repository object types on demand using Rails generators. Each work type gets its own model, form, indexer, and controller.
+- **Deposit workflows** — Route submissions through configurable Sipity-based approval workflows with multiple reviewers and states.
+- **Flexible metadata** — Define metadata schemas via YAML files or the M3 profile UI without touching Ruby code.
+- **IIIF support** — Serve IIIF manifests and integrate with Universal Viewer or your own image server.
+- **Collections** — Organize works into nested, typed collections with granular access controls.
+- **Admin dashboard** — Toggle features, manage users, configure workflows, and view analytics from a built-in UI.
+- **Background jobs** — Process file ingestion, derivative generation, characterization, and fixity checking asynchronously via ActiveJob.
 
-## Need inspiration?
+## Get started
 
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+<Steps>
+  <Step title="Install prerequisites">
+    Set up Ruby 3.3+, Rails 7.2, Solr, Fedora (or PostgreSQL via Valkyrie), Redis, ImageMagick, FITS, and LibreOffice.
+  </Step>
+  <Step title="Generate your application">
+    Use the Hyrax application template to scaffold a new Rails app with Hyrax pre-configured:
+    ```bash
+    HYRAX_SKIP_WINGS=true rails _7.2.2.1_ new my_app --database=postgresql \
+      -m https://raw.githubusercontent.com/samvera/hyrax/hyrax-v5.2.0/template.rb
+    ```
+  </Step>
+  <Step title="Start services and run migrations">
+    Start your backend services (Solr, Postgres, Redis) then run migrations and seed data:
+    ```bash
+    rails db:migrate
+    rails db:seed
+    ```
+  </Step>
+  <Step title="Generate a work type and launch">
+    Create at least one work type, then start the Rails server:
+    ```bash
+    rails generate hyrax:work_resource GenericWork
+    rails server
+    ```
+    Browse to [localhost:3000](http://localhost:3000) to see your repository.
+  </Step>
+</Steps>
+
+<Note>
+  Hyrax is a Rails Engine — not a standalone web application. You must mount it inside your own Rails app. The application template handles this automatically when you generate a new app.
+</Note>
+
+## Explore the docs
+
+<CardGroup cols={2}>
+  <Card title="Work Types" icon="file-lines" href="/guides/work-types">
+    Generate and customize repository object types for your collection.
+  </Card>
+  <Card title="Metadata Configuration" icon="tags" href="/guides/metadata">
+    Define custom metadata fields with YAML schemas or M3 profiles.
+  </Card>
+  <Card title="Deposit Workflows" icon="arrows-spin" href="/concepts/workflows">
+    Configure multi-step approval workflows for content submission.
+  </Card>
+  <Card title="Docker Deployment" icon="docker" href="/deployment/docker">
+    Run Hyrax and all its dependencies using Docker Compose.
+  </Card>
+  <Card title="IIIF Integration" icon="image" href="/guides/iiif">
+    Configure IIIF image servers and manifest generation.
+  </Card>
+  <Card title="Generators Reference" icon="terminal" href="/reference/generators/install">
+    Full reference for all Hyrax Rails generators.
+  </Card>
+</CardGroup>

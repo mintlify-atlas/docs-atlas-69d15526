@@ -1,0 +1,199 @@
+---
+title: "Running Hyrax with Docker and Docker Compose"
+description: "Use Docker Compose to run Hyrax locally for engine or application development, with reference environments for ActiveFedora and Valkyrie backends."
+---
+
+Hyrax ships with a set of Docker Compose configurations that provide a complete, production-like local environment for both engine development and application development. These environments are substantially closer to a real Hyrax deployment than the older `solr_wrapper`/`fedora_wrapper` approach, and they handle service orchestration, database migrations, and asset compilation automatically.
+
+## Reference applications
+
+Three internal test applications are bundled with the Hyrax repository, each targeting a different storage backend. They run as separate Docker Compose projects and can operate concurrently on the same workstation (given sufficient RAM).
+
+| App | Compose file | Backend | Port |
+|---|---|---|---|
+| **Dassie** | `docker-compose.yml` | ActiveFedora + Fedora 4 | 3000 |
+| **Koppie** | `docker-compose-koppie.yml` | Valkyrie + PostgreSQL | 3001 |
+| **Sirenia** | `docker-compose-sirenia.yml` | Valkyrie + Fedora 6 | 3002 |
+
+`docker-compose.yml` is a thin include that delegates to `docker-compose-dassie.yml`. Running `docker compose` without a `-f` flag always starts Dassie.
+
+## Starting Dassie (ActiveFedora)
+
+Dassie is the default reference environment. It starts the following services:
+
+- **web** — Hyrax Rails application (Puma on port 3000)
+- **worker** — Sidekiq background job processor
+- **fcrepo** — Fedora 4 repository (`ghcr.io/samvera/fcrepo4:4.7.5`, port 8080)
+- **solr** — Solr 9.9 search index (port 8983)
+- **postgres** — PostgreSQL 15 database (port 5432)
+- **redis** — Redis 6.2 key-value store
+- **memcached** — session/object cache (port 11211)
+- **fits** — FITS characterization servlet (`ghcr.io/samvera/fitsservlet:1.6.0`)
+- **chrome** — Selenium Chromium node for feature tests
+
+<Steps>
+  <Step title="Build the images">
+    ```bash
+    docker compose build
+    ```
+  </Step>
+  <Step title="Start all services">
+    ```bash
+    docker compose up
+    ```
+
+    Database migrations run automatically on first start. The application is available at `http://localhost:3000`.
+  </Step>
+  <Step title="Stop the stack">
+    Press `Ctrl+C`. Data is preserved in named Docker volumes between restarts.
+    To restart later, run `docker compose up` again — no rebuild needed.
+  </Step>
+</Steps>
+
+<Note>
+  Changes to the Hyrax engine code at `./` are immediately reflected in the running application via bind mount. You may need to restart the stack for changes that affect initializers or routes.
+</Note>
+
+## Starting Koppie or Sirenia (Valkyrie)
+
+Koppie uses Valkyrie with PostgreSQL as the sole persistence backend — no Fedora required. Sirenia adds a Fedora 6 adapter on top of the same base image.
+
+<CodeGroup>
+  ```bash Koppie (Valkyrie + PostgreSQL)
+  docker compose -f docker-compose-koppie.yml build
+  docker compose -f docker-compose-koppie.yml up
+  ```
+
+  ```bash Sirenia (Valkyrie + Fedora 6)
+  # Sirenia reuses the Koppie image; build Koppie first
+  docker compose -f docker-compose-koppie.yml build
+  docker compose -f docker-compose-sirenia.yml up
+  ```
+</CodeGroup>
+
+Koppie exposes the web application on port **3001** and Solr on port **8984**. Sirenia runs on port **3002**.
+
+## Running commands inside containers
+
+Both the `web` application and the `hyrax-engine` source tree are bind-mounted inside the `web` container at different paths:
+
+| Path | Contents |
+|---|---|
+| `/app/samvera/hyrax-webapp` | The `.dassie` (or `.koppie`) Rails application |
+| `/app/samvera/hyrax-engine` | Your local Hyrax engine clone |
+
+Use the `-w` flag to target the correct working directory when running commands.
+
+<CodeGroup>
+  ```bash Run migrations (Rails app)
+  docker compose exec -w /app/samvera/hyrax-webapp web sh -c "bundle exec rails db:migrate"
+  ```
+
+  ```bash Open a Rails console (Koppie)
+  docker compose -f docker-compose-koppie.yml exec web bundle exec rails c
+  ```
+
+  ```bash Run the full test suite (engine)
+  docker compose exec -w /app/samvera/hyrax-engine web sh -c "bundle exec rspec"
+  ```
+
+  ```bash List rake tasks (engine)
+  docker compose exec -w /app/samvera/hyrax-engine web sh -c "bundle exec rake -T"
+  ```
+</CodeGroup>
+
+<Note>
+  Always use `bundle exec rspec`, not plain `rspec`. If you see a gem version conflict, force the engine's Gemfile explicitly: `BUNDLE_GEMFILE=Gemfile bundle exec rspec ./spec/path/to/spec.rb`.
+</Note>
+
+## Lando for local application development
+
+When developing a Hyrax-*based* application (rather than the engine itself), [Lando](https://lando.dev) is the recommended approach. It runs only the dependent services in containers while the Rails application runs on your host machine, which avoids file-permission issues and makes debuggers easier to attach.
+
+```bash
+cd my_app
+lando start
+rails db:migrate
+rails db:seed
+rails s
+```
+
+The generated `.lando.yml` provides Solr, PostgreSQL, Redis, a FITS servlet, and optionally Fedora.
+
+## Port reference
+
+| Service | Dassie | Koppie |
+|---|---|---|
+| Web (Puma) | 3000 | 3001 |
+| Solr | 8983 | 8984 |
+| PostgreSQL | 5432 | 5433 |
+| Memcached | 11211 | 11212 |
+| Fedora | 8080 | — |
+| Selenium | 4445 | 4446 |
+
+## Using the published base image
+
+For your own Hyrax application you can inherit from the published base image instead of building from source:
+
+```dockerfile
+FROM samveralabs/hyrax
+```
+
+The `hyrax-base` target provides Ruby 3.3 on Debian Trixie with all system dependencies pre-installed (ImageMagick, ffmpeg, LibreOffice, Tesseract, Ghostscript, libvips, and more). The `hyrax-worker-base` target additionally installs FITS 1.6.0 and sets the default command to `bundle exec sidekiq`.
+
+## Debugging
+
+To attach a debugger to the running web container:
+
+<Steps>
+  <Step title="Keep docker compose up running, then open a new terminal" />
+  <Step title="Find the container ID">
+    ```bash
+    docker container ls
+    ```
+  </Step>
+  <Step title="Attach to the container">
+    ```bash
+    docker attach <CONTAINER_ID>
+    ```
+  </Step>
+</Steps>
+
+## Troubleshooting
+
+**Solr permission errors (`cannot create directory: Permission denied`)**
+
+```bash
+docker compose down --volumes
+docker compose up
+```
+
+<Warning>
+  The `--volumes` flag removes all named volumes including persisted data. Only use it when you are prepared to lose your local repository content.
+</Warning>
+
+**Build failures (gem version conflicts)**
+
+```bash
+bundle update   # run in ./hyrax and in ./hyrax/.dassie
+docker compose build
+```
+
+**Services fail to start**
+
+Delete any `Gemfile.lock` files in `./hyrax` or `./hyrax/.dassie`, then rebuild:
+
+```bash
+docker compose build
+docker compose up
+```
+
+**Koppie: `exec /app/samvera/hyrax-entrypoint.sh: no such file or directory`**
+
+The cached base image layer is stale. Rebuild without the cache:
+
+```bash
+docker compose -f docker-compose-koppie.yml build --no-cache
+```
+
+On Windows hosts, also verify that Git is configured with `--core.autocrlf false` when cloning.

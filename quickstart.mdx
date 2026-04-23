@@ -1,80 +1,132 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: "Quickstart: Create Your First Hyrax Application"
+description: "Generate a new Hyrax-based Rails application, start backend services with Lando, run migrations, and create your first work type in under 15 minutes."
 ---
 
-## Get started in three steps
+Hyrax ships as a Rails Engine, so your first step is generating a host application using the Hyrax template. The template wires up Hyrax, installs dependencies, and configures Lando to manage the backend services (Solr, PostgreSQL, Redis, and FITS) for local development. By the end of this guide you will have a running repository at `localhost:3000`.
 
-Get your documentation site running locally and make your first customization.
+<Note>
+  These instructions target **Hyrax v5.2.0** with Ruby 3.3 and Rails 7.2. If you are working with a different version, select the matching branch or tag in the [GitHub repository](https://github.com/samvera/hyrax).
+</Note>
 
-### Step 1: Set up your local environment
+## Prerequisites
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+Before you begin, make sure you have the following installed:
 
-### Step 2: Deploy your changes
+| Tool | Minimum version | Notes |
+|------|----------------|-------|
+| Ruby | 3.3 | Use RVM or rbenv |
+| Rails | 7.2 | `gem install rails -v 7.2.2.1` |
+| Node.js | Any LTS | Required by Rails |
+| Docker | 20+ | Required by Lando |
+| Lando | 3.x | Manages backend services |
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+See the [Installation guide](/installation) for detailed setup instructions for each prerequisite.
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+## Steps
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+<Steps>
+  <Step title="Generate the application">
+    Use the Hyrax application template to create a new Rails app. The `HYRAX_SKIP_WINGS` flag prevents the legacy ActiveFedora adapter from loading during generation.
 
-### Step 3: Go live
+    ```bash
+    HYRAX_SKIP_WINGS=true rails _7.2.2.1_ new my_app \
+      --database=postgresql \
+      -m https://raw.githubusercontent.com/samvera/hyrax/hyrax-v5.2.0/template.rb
+    ```
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+    The template automatically:
+    - Adds Hyrax to your `Gemfile` and runs `bundle install`
+    - Runs `rails generate hyrax:install` to add migrations, initializers, and routes
+    - Creates a `.lando.yml` configuring Solr, PostgreSQL, Redis, and the FITS servlet
+  </Step>
+
+  <Step title="Start backend services">
+    Change into your new application directory and start the Lando-managed services:
+
+    ```bash
+    cd my_app
+    lando start
+    ```
+
+    Lando pulls and starts containers for Solr, PostgreSQL, Redis, and FITS. This may take a few minutes on first run. When complete, Lando prints the URLs for each service.
+  </Step>
+
+  <Step title="Run database migrations and seed data">
+    Load Hyrax's database schema and seed the default collection types and workflows:
+
+    ```bash
+    rails db:migrate
+    rails db:seed
+    ```
+
+    The seed task creates the default administrative set and loads Hyrax's built-in deposit workflows into the database.
+
+    <Tip>
+      Run these commands again when deploying to a new environment for the first time.
+    </Tip>
+  </Step>
+
+  <Step title="Generate a work type">
+    Hyrax requires at least one work type before you can deposit content. Generate one using the built-in Rails generator:
+
+    ```bash
+    rails generate hyrax:work_resource GenericWork
+    ```
+
+    This creates a `GenericWork` model, indexer, form, controller, views, and specs. You can generate as many work types as your repository needs.
+
+    For a namespaced work type:
+    ```bash
+    rails generate hyrax:work_resource My/MovingImage
+    ```
+  </Step>
+
+  <Step title="Configure the job queue for development">
+    For local development, set ActiveJob to process jobs inline (immediately, in the foreground):
+
+    ```bash
+    # In your .env file or shell:
+    HYRAX_ACTIVE_JOB_QUEUE=inline
+    ```
+
+    This avoids needing a separate worker process during development.
+  </Step>
+
+  <Step title="Start the Rails server">
+    ```bash
+    rails server
+    ```
+
+    Visit [http://localhost:3000](http://localhost:3000) to see your repository. You should see the Hyrax homepage with a search bar and navigation.
+  </Step>
+
+  <Step title="Create an admin user">
+    To access the administrative dashboard, assign yourself the admin role. Edit (or create) `config/role_map.yml` in your application:
+
+    ```yaml config/role_map.yml
+    development:
+      admin:
+        - your.email@example.org
+    ```
+
+    Restart the Rails server, then sign up or sign in with the email address you added. Navigate to `/dashboard` to access the administrative interface.
+  </Step>
+</Steps>
 
 ## Next steps
 
-Now that you have your docs running, explore these key features:
-
 <CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
+  <Card title="Work Types" icon="file-lines" href="/guides/work-types">
+    Customize your generated work type with custom metadata fields and forms.
+  </Card>
+  <Card title="Metadata Configuration" icon="tags" href="/guides/metadata">
+    Define your metadata schema using YAML files or M3 profiles.
+  </Card>
+  <Card title="Deposit Workflows" icon="arrows-spin" href="/concepts/workflows">
+    Configure approval workflows for your admin sets.
+  </Card>
+  <Card title="Admin Dashboard" icon="gauge" href="/admin/dashboard">
+    Explore the administrative controls available after signing in.
+  </Card>
 </CardGroup>
-
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>

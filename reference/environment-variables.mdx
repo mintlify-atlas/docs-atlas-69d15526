@@ -1,0 +1,108 @@
+---
+title: "Environment Variables Reference for Hyrax"
+description: "All environment variables read by Hyrax at boot and runtime, grouped by category: analytics, storage, jobs, Valkyrie, and flexible metadata — with defaults."
+---
+
+Hyrax reads configuration from the process environment at startup. Setting environment variables is the recommended way to configure paths, credentials, and feature flags in production without changing application code. Variables marked with a default of `false` or `''` are treated as disabled when absent.
+
+<Note>
+  In development, use a `.env` file loaded by the `dotenv-rails` gem (installed automatically by `rails generate hyrax:install`).
+</Note>
+
+---
+
+## Analytics
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `HYRAX_ANALYTICS` | `false` | Master switch for analytics. Set to `true` to enable event and page-view tracking. |
+| `HYRAX_ANALYTICS_PROVIDER` | `'ga4'` | Analytics provider. Supported values: `ga4`, `matomo`. |
+| `HYRAX_ANALYTICS_REPORTING` | `false` | Enable dashboard analytics reports. Also requires the Google OAuth variables below. |
+| `ANALYTICS_START_DATE` | 1 year ago | ISO 8601 date (`YYYY-MM-DD`) from which "all-time" aggregates begin. |
+| `GOOGLE_ANALYTICS_ID` | — | Google Analytics measurement or tracking ID (e.g. `G-XXXXXXXXXX`). Required when `HYRAX_ANALYTICS_REPORTING=true`. |
+| `GOOGLE_ANALYTICS_PROPERTY_ID` | — | Numeric GA4 property ID. Required for the Data API when reporting is enabled. |
+| `GOOGLE_ACCOUNT_JSON` | — | Inline JSON string for the Google service-account credentials. Mutually exclusive with `GOOGLE_ACCOUNT_JSON_PATH`. |
+| `GOOGLE_ACCOUNT_JSON_PATH` | — | Filesystem path to the Google service-account JSON key file. Used when `GOOGLE_ACCOUNT_JSON` is blank. |
+
+---
+
+## File Characterization
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CH12N_TOOL` | `'fits'` | Characterization tool to use. Options include `fits`, `fits_servlet`, `ffprobe`. Maps to `config.characterization_options[:ch12n_tool]`. |
+
+---
+
+## Flexible Metadata
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `HYRAX_FLEXIBLE` | `false` | Enable the M3 flexible metadata profile UI for all resource types. |
+| `HYRAX_FLEXIBLE_CLASSES` | — | Comma-separated list of model class names to opt in to flexible metadata (e.g. `Hyrax::PcdmCollection,GenericWork`). When blank and `HYRAX_FLEXIBLE=true`, defaults to the collection, file set, and admin set models. |
+| `HYRAX_DISABLE_INCLUDE_METADATA` | `false` | Disable automatic inclusion of static core/basic metadata schemas in works, collections, and file sets. |
+
+---
+
+## Valkyrie and Adapter Flags
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `HYRAX_VALKYRIE` | `false` | Enable Valkyrie storage for new deposits. Equivalent to `config.use_valkyrie = true`. |
+| `VALKYRIE_TRANSITION` | `false` | Enable the Freyja dual-mode adapter for gradual migration. |
+| `HYRAX_SKIP_WINGS` | `false` | Disable the Wings ActiveFedora-compatibility adapter. Forces `use_valkyrie` to `true`. |
+| `HYRAX_SKIP_FREYJA` | `false` | Disable the Freyja adapter. |
+| `HYRAX_SKIP_FRIGG` | `false` | Disable the Frigg adapter. |
+
+---
+
+## Local Storage Paths
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `HYRAX_DERIVATIVES_PATH` | `Rails.root/tmp/derivatives` | Absolute path where generated derivative files (thumbnails, compressed video, etc.) are stored. |
+| `HYRAX_UPLOAD_PATH` | `Rails.root/tmp/uploads` | Absolute path where uploaded originals are staged before ingestion. |
+| `HYRAX_CACHE_PATH` | `Rails.root/tmp/cache` | Absolute path used for miscellaneous application cache files. |
+| `HYRAX_BRANDING_PATH` | `Rails.root/public/branding` | Absolute path where repository logo and banner images are persisted. |
+
+---
+
+## System Dependencies
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `HYRAX_FFMPEG_PATH` | `'ffmpeg'` | Path to the `ffmpeg` binary. Hyrax uses FFmpeg to generate video and audio derivatives when `config.enable_ffmpeg = true`. |
+| `HYRAX_FITS_PATH` | `'fits.sh'` | Path to the FITS (File Information Tool Set) shell script used for file characterization. |
+
+---
+
+## Background Jobs
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `HYRAX_ACTIVE_JOB_QUEUE` | `'async'` | ActiveJob queue adapter name set in `config/application.rb` during install. Accepts any adapter registered in your application (e.g. `sidekiq`, `resque`, `good_job`). |
+| `HYRAX_REDIS_NAMESPACE` | `'hyrax'` | Redis key namespace for Hyrax-managed pub/sub and cache keys. |
+
+---
+
+## Example `.env` File
+
+```bash
+# .env (development)
+HYRAX_ANALYTICS=false
+HYRAX_ANALYTICS_PROVIDER=ga4
+HYRAX_VALKYRIE=true
+HYRAX_SKIP_WINGS=false
+
+HYRAX_DERIVATIVES_PATH=/data/derivatives
+HYRAX_UPLOAD_PATH=/data/uploads
+HYRAX_BRANDING_PATH=/app/public/branding
+
+HYRAX_FITS_PATH=/opt/fits/fits.sh
+HYRAX_FFMPEG_PATH=/usr/bin/ffmpeg
+
+HYRAX_ACTIVE_JOB_QUEUE=sidekiq
+HYRAX_REDIS_NAMESPACE=myrepo
+
+CH12N_TOOL=fits
+```

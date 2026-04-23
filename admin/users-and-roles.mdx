@@ -1,0 +1,122 @@
+---
+title: "User Management, Roles, and Proxy Deposit"
+description: "How Hyrax's role system works, how to assign the admin role, configure group names, manage user profiles, and set up proxy deposit."
+---
+
+Hyrax uses a group-based role system to control access to content and administrative functions. Every authenticated user is a member of the `registered` group, while unauthenticated visitors belong to the `public` group. A third group, `admin`, grants access to the administrative dashboard and elevated repository controls. The string names used for each group are configurable.
+
+## Role groups
+
+Hyrax's three built-in groups map directly to access control entries on objects and permission templates.
+
+| Group | Default name | Who belongs |
+|---|---|---|
+| Admin | `admin` | Users explicitly assigned the admin role |
+| Registered | `registered` | Any authenticated (signed-in) user |
+| Public | `public` | Unauthenticated visitors |
+
+These names appear in Solr documents, `PermissionTemplateAccess` records, and object ACLs. If you need to change the default names — for example, to match a campus identity system — override them in your Hyrax initialiser:
+
+```ruby config/initializers/hyrax.rb
+Hyrax.config do |config|
+  config.admin_user_group_name      = 'admin'
+  config.registered_user_group_name = 'registered'
+  config.public_user_group_name     = 'public'
+end
+```
+
+<Warning>
+  Changing group names after objects have been deposited requires reindexing all objects so that the ACL entries in Solr are updated. Make this change before ingesting content if at all possible.
+</Warning>
+
+## Assigning the admin role
+
+The simplest way to grant admin access is via `config/role_map.yml`. Hyrax reads this file at startup and maps email addresses to groups.
+
+<Steps>
+  <Step title="Create or edit the role map">
+    ```yaml config/role_map.yml
+    development:
+      admin:
+        - admin@example.org
+
+    test:
+      admin:
+        - admin@example.org
+
+    production:
+      admin:
+        - repository.admin@institution.edu
+    ```
+  </Step>
+  <Step title="Restart the application">
+    Role map changes are read during initialisation. Restart your Rails server or worker processes after editing the file.
+  </Step>
+  <Step title="Verify the assignment">
+    Sign in as the target user and navigate to `/dashboard`. The administrative sidebar sections (Features, Workflows, Appearance, etc.) should now be visible.
+  </Step>
+</Steps>
+
+<Note>
+  Hyrax also supports role management through database-backed role models (e.g., via Rolify). If your application uses a database-backed approach, the role_map.yml file may not be relevant. Consult your application's `app/models/role.rb` for the implementation in use.
+</Note>
+
+## Special system users
+
+Hyrax defines three internal user accounts used for automated or background operations. These users are not real people and should not be used for interactive login.
+
+| Key | Default email | Purpose |
+|---|---|---|
+| `system_user_key` | `systemuser@example.com` | Acting user for background jobs such as default admin set creation |
+| `batch_user_key` | `batchuser@example.com` | Used for batch import and ingest operations |
+| `audit_user_key` | `audituser@example.com` | Attributed to fixity check and audit jobs |
+
+Override the emails if they conflict with real accounts in your identity system:
+
+```ruby config/initializers/hyrax.rb
+Hyrax.config do |config|
+  config.system_user_key = 'hyrax-system@institution.edu'
+  config.batch_user_key  = 'hyrax-batch@institution.edu'
+  config.audit_user_key  = 'hyrax-audit@institution.edu'
+end
+```
+
+## User profiles
+
+Each user has a profile page accessible at `/dashboard/profiles/:id`. The profile displays the user's deposited works, avatar, and social links. Users can edit their own profile at `/dashboard/profiles/:id/edit`.
+
+Administrators can view profiles for any user. Listing all registered users is available at `/admin/users`.
+
+The `hide_users_list` feature flag (default: `true`) controls whether the public user list is shown to unauthenticated visitors. When enabled, the list is only visible to signed-in users. See [Features](/admin/features) for instructions on toggling it.
+
+## Proxy deposit
+
+Proxy deposit allows a user to authorise another user to deposit works on their behalf. When enabled, depositors see a **Manage Proxies** section on their profile page.
+
+<Steps>
+  <Step title="Enable the feature">
+    The `proxy_deposit` feature is on by default. Confirm it is enabled at `/admin/features` or in `config/features.yml`:
+
+    ```yaml config/features.yml
+    proxy_deposit:
+      enabled: true
+    ```
+  </Step>
+  <Step title="Add a proxy">
+    The depositor visits their profile edit page and adds a proxy by email address. Hyrax records the relationship via the depositors controller at `POST /users/:user_id/depositors`.
+  </Step>
+  <Step title="Deposit on behalf of another user">
+    The proxy signs in and selects the original depositor's name from the **On behalf of** dropdown on the new work form. The resulting work is attributed to the original depositor, not the proxy.
+  </Step>
+  <Step title="Remove a proxy">
+    Proxies can be revoked by the depositor at any time from their profile page, or programmatically via `DELETE /users/:user_id/depositors/:id`.
+  </Step>
+</Steps>
+
+<Note>
+  Proxy deposit is independent of the transfer works feature. Transfer moves ownership of an already-deposited work; proxy deposit delegates the act of depositing a new work.
+</Note>
+
+## Work transfer
+
+The `transfer_works` feature (default: enabled) lets a depositor transfer ownership of one of their works to another user. After a transfer request is sent, the recipient must accept or reject it at `/dashboard/transfers`. Disable this feature in `config/features.yml` if your policy does not allow ownership changes.

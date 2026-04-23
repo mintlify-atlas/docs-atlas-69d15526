@@ -1,0 +1,186 @@
+---
+title: "The Actor Stack: Middleware for Deposit Operations"
+description: "How the Hyrax actor middleware stack processes work creation, update, and destroy operations, and how to write and insert your own actors."
+---
+
+The Hyrax actor stack is a middleware chain that processes deposit operations (create, update, destroy) on works. Each actor in the chain performs a discrete unit of work—applying visibility settings, attaching files, running callbacks—and then delegates to the next actor down the stack. This pattern is modelled on `ActionDispatch::MiddlewareStack` and makes it straightforward to insert, replace, or remove processing steps without modifying Hyrax core code.
+
+## How the Stack Works
+
+When a user submits a deposit form, Hyrax builds the actor stack and calls `#create` on the top-most actor with an `Environment` object. Each actor may:
+
+1. Do work **before** delegating (pre-processing).
+2. Call `next_actor.create(env)` to continue down the stack.
+3. Do work **after** the delegate returns (post-processing).
+4. Return `true` to indicate success, or `false` to halt the chain.
+
+If any actor returns `false`, actors higher in the stack see a falsy result from their `next_actor` call and can decide whether to halt or handle the error. The final actor in the chain is always `Hyrax::Actors::Terminator`, which is a no-op that returns `true`.
+
+## The Default Actor Stack
+
+The following actors ship with Hyrax and run in this order (top to bottom) for a standard work deposit:
+
+| Actor | Responsibility |
+|-------|---------------|
+| `Hyrax::Actors::TransactionalRequest` | Wraps the entire stack in a database transaction. |
+| `Hyrax::Actors::OptimisticLockValidator` | Checks that the record has not been modified by another request since it was loaded. |
+| `Hyrax::Actors::DefaultAdminSetActor` | Assigns the default admin set when no admin set is specified. |
+| `Hyrax::Actors::CollectionsMembershipActor` | Associates the work with the specified collections. |
+| `Hyrax::Actors::ApplyPermissionTemplateActor` | Copies access controls from the admin set's permission template. |
+| `Hyrax::Actors::InterpretVisibilityActor` | Resolves embargo/lease/open-access visibility parameters and validates them against the admin set template. |
+| `Hyrax::Actors::CreateWithFilesActor` | Detaches uploaded file IDs from the attributes, validates ownership, and enqueues `AttachFilesToWorkJob`. |
+| `Hyrax::Actors::CreateWithRemoteFilesActor` | Fetches and attaches files from remote URLs (BrowseEverything). |
+| `Hyrax::Actors::ApplyOrderActor` | Reorders ordered member file sets when the ordered members list changes. |
+| `Hyrax::Actors::ModelActor` | Dispatches to a work-type-specific actor class (`Hyrax::Actors::<WorkType>Actor`) if one exists, falling back to `NullActor`. |
+| `Hyrax::Actors::AddToWorkActor` | Attaches the newly created work as a member of a parent work. |
+| `Hyrax::Actors::FeaturedWorkActor` | Marks the work as featured when the `featured` attribute is set. |
+| `Hyrax::Actors::CleanupFileSetActor` | Removes file sets orphaned by a failed deposit transaction. |
+| `Hyrax::Actors::CleanupTrophiesActor` | Removes trophy associations when a work is deleted. |
+| `Hyrax::Actors::TransferRequestActor` | Creates a transfer request if the depositor has requested a change of ownership. |
+| `Hyrax::Actors::Terminator` | End-of-chain no-op. Always returns `true`. |
+
+## The Environment Object
+
+Every actor receives a `Hyrax::Actors::Environment` instance as its sole argument. The environment carries the three objects that flow through the entire stack:
+
+```ruby
+# app/actors/hyrax/actors/environment.rb
+class Hyrax::Actors::Environment
+  attr_accessor :curation_concern  # The work being created/updated/destroyed
+  attr_accessor :current_ability   # Cancan Ability for the acting user
+  attr_accessor :attributes        # Hash of form params (mutable)
+
+  def user
+    current_ability.current_user
+  end
+end
+```
+
+Actors may mutate `env.attributes` (for example, `InterpretVisibilityActor` removes embargo params after processing them) but should never replace `env.curation_concern` with a different object instance.
+
+## Writing a Custom Actor
+
+A custom actor inherits from `Hyrax::Actors::AbstractActor` and overrides whichever of `#create`, `#update`, and `#destroy` it cares about. The base class delegates all three to `next_actor` by default.
+
+<Steps>
+  <Step title="Create the actor class">
+    ```ruby
+    # app/actors/hyrax/actors/notify_slack_actor.rb
+    module Hyrax
+      module Actors
+        class NotifySlackActor < AbstractActor
+          # Called when a new work is deposited.
+          # @param env [Hyrax::Actors::Environment]
+          # @return [Boolean]
+          def create(env)
+            # Always continue the stack first; notify only on success.
+            result = next_actor.create(env)
+            notify_slack(env.curation_concern) if result
+            result
+          end
+
+          private
+
+          def notify_slack(work)
+            SlackNotifier.post(
+              channel: '#deposits',
+              text: "New work deposited: #{work.title.first} (#{work.id})"
+            )
+            true
+          rescue StandardError => e
+            # Log but don't fail the deposit if Slack is down.
+            Hyrax.logger.warn("Slack notification failed: #{e.message}")
+            true
+          end
+        end
+      end
+    end
+    ```
+  </Step>
+  <Step title="Insert the actor into the stack">
+    Configure the stack in `config/initializers/hyrax.rb`. Use `insert_before` or `insert_after` to position your actor relative to an existing one:
+
+    ```ruby
+    # config/initializers/hyrax.rb
+    Hyrax::Actor::DefaultMiddlewareStack.build_stack.tap do |stack|
+      # Run after files are attached, before the model actor
+      stack.insert_before Hyrax::Actors::ModelActor, Hyrax::Actors::NotifySlackActor
+    end
+    ```
+  </Step>
+  <Step title="Verify the stack order">
+    You can inspect the current stack at the Rails console:
+
+    ```ruby
+    Hyrax::CurationConcern.actor_factory.middlewares.map(&:name)
+    ```
+  </Step>
+</Steps>
+
+## Complete Minimal Actor Example
+
+<CodeGroup>
+
+```ruby app/actors/hyrax/actors/audit_trail_actor.rb
+# frozen_string_literal: true
+module Hyrax
+  module Actors
+    ##
+    # Writes an audit trail entry for every create, update, and destroy
+    # operation on a work.
+    class AuditTrailActor < AbstractActor
+      # @param env [Hyrax::Actors::Environment]
+      # @return [Boolean]
+      def create(env)
+        next_actor.create(env).tap do |result|
+          log_event(:create, env, result)
+        end
+      end
+
+      # @param env [Hyrax::Actors::Environment]
+      # @return [Boolean]
+      def update(env)
+        next_actor.update(env).tap do |result|
+          log_event(:update, env, result)
+        end
+      end
+
+      # @param env [Hyrax::Actors::Environment]
+      # @return [Boolean]
+      def destroy(env)
+        next_actor.destroy(env).tap do |result|
+          log_event(:destroy, env, result)
+        end
+      end
+
+      private
+
+      def log_event(action, env, success)
+        AuditLog.create!(
+          action:    action,
+          work_id:   env.curation_concern.id,
+          user_key:  env.user.user_key,
+          succeeded: success
+        )
+      end
+    end
+  end
+end
+```
+
+```ruby config/initializers/hyrax.rb (stack insertion)
+Hyrax.config do |config|
+  # ... other config ...
+end
+
+Hyrax::CurationConcern.actor_factory.middlewares.tap do |stack|
+  stack.insert_after Hyrax::Actors::CreateWithFilesActor,
+                     Hyrax::Actors::AuditTrailActor
+end
+```
+
+</CodeGroup>
+
+<Note>
+  Actors run inside a database transaction opened by `Hyrax::Actors::TransactionalRequest`. If your actor performs external side effects (HTTP calls, email), be aware that the transaction may still roll back after your actor runs. Consider using an `after_create_concern` callback instead for non-transactional side effects.
+</Note>

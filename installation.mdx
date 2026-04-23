@@ -1,0 +1,422 @@
+---
+title: "Installation: prerequisites for a Hyrax application"
+description: "Install Ruby 3.3, Rails 7.2, Solr, Fedora or PostgreSQL, Redis, ImageMagick, FITS, LibreOffice, and ffmpeg to run a Hyrax 5.2.0 digital repository."
+---
+
+A Hyrax-based application depends on several services and system tools. This page covers every prerequisite, with OS-specific instructions where they differ. If you want to get running quickly without installing each service locally, use the [Lando-based approach](#recommended-lando-based-development-setup) — it manages all backend services inside Docker containers.
+
+## System requirements at a glance
+
+| Prerequisite | Minimum version | Notes |
+|---|---|---|
+| Ruby | 3.3 | 3.3+ recommended; use RVM or rbenv |
+| Rails | 7.2.2.1 | Hyrax requires Rails > 6.1 and < 8.0 |
+| Apache Solr | 5.x | Tested up to 8.11.1 |
+| Fedora Commons | 4.7.6 (ActiveFedora) or 6.5.1 (Valkyrie) | PostgreSQL can replace Fedora when using Valkyrie |
+| PostgreSQL | 12+ | Recommended SQL RDBMS |
+| Redis | 4.x+ | Required for activity streams and job queues |
+| ImageMagick | any | Must be compiled with JPEG-2000 (OpenJPEG) support |
+| FITS | up to 1.5.0 | Avoid version 1.1.0 |
+| LibreOffice | any current | Required for document derivative generation |
+| ffmpeg | > 1.0 | Optional; required for audio/video transcoding |
+| Node.js | any LTS | JavaScript runtime for the Rails asset pipeline |
+
+## Recommended: Lando-based development setup
+
+For local development, [Lando](https://lando.dev) is the recommended way to run Hyrax's backend services. It uses Docker to provide Solr, PostgreSQL, Redis, a FITS servlet, and Fedora without requiring you to install or configure any of them manually. The generated `.lando.yml` in your application directory is the canonical reference for which services and versions are used.
+
+<Steps>
+  <Step title="Install Docker">
+    Download and install [Docker Desktop](https://www.docker.com/products/docker-desktop/) for your platform. Docker is required by Lando.
+
+    Verify Docker is running:
+
+    ```bash
+    docker info
+    ```
+  </Step>
+  <Step title="Install Lando">
+    Download the Lando installer for your OS from [lando.dev](https://lando.dev/download/). Lando includes a bundled version of Docker Compose.
+
+    Verify the installation:
+
+    ```bash
+    lando version
+    ```
+  </Step>
+  <Step title="Start services">
+    After generating your Hyrax application (see the [quickstart](/quickstart)), start all backend services from your application directory:
+
+    ```bash
+    cd my_app
+    lando start
+    ```
+
+    Lando reads the generated `.lando.yml` and starts containers for Solr, Postgres, Redis, the FITS servlet, and Fedora automatically.
+  </Step>
+</Steps>
+
+If you prefer to install and manage services yourself — for example in a CI environment or on a server — follow the manual installation instructions below.
+
+---
+
+## Ruby
+
+Hyrax supports **Ruby 3.3**. When starting a new project, use the latest Ruby 3.3 patch release.
+
+<Tip>
+  Use a Ruby version manager so you can switch Ruby versions per project without affecting your system Ruby.
+</Tip>
+
+<Tabs>
+  <Tab title="RVM">
+    Install RVM and Ruby 3.3:
+
+    ```bash
+    \curl -sSL https://get.rvm.io | bash -s stable
+    source ~/.rvm/scripts/rvm
+    rvm install 3.3
+    rvm use 3.3 --default
+    ruby -v
+    ```
+  </Tab>
+  <Tab title="rbenv">
+    Install rbenv and ruby-build, then install Ruby 3.3:
+
+    ```bash
+    # macOS (Homebrew)
+    brew install rbenv ruby-build
+
+    # Linux (via git)
+    git clone https://github.com/rbenv/rbenv.git ~/.rbenv
+    git clone https://github.com/rbenv/ruby-build.git ~/.rbenv/plugins/ruby-build
+    echo 'eval "$(rbenv init -)"' >> ~/.bashrc
+    source ~/.bashrc
+
+    rbenv install 3.3.6
+    rbenv global 3.3.6
+    ruby -v
+    ```
+  </Tab>
+</Tabs>
+
+## Rails
+
+Hyrax requires Rails 7.2. Install the specific version used by the Hyrax 5.2.0 template:
+
+```bash
+gem install rails -v 7.2.2.1
+rails -v
+# => Rails 7.2.2.1
+```
+
+## Node.js (JavaScript runtime)
+
+Rails requires a JavaScript runtime. Node.js is the recommended option.
+
+<Tabs>
+  <Tab title="macOS">
+    Node.js is typically pre-installed on macOS. Verify with:
+
+    ```bash
+    node -v
+    ```
+
+    If not installed, use Homebrew:
+
+    ```bash
+    brew install node
+    ```
+  </Tab>
+  <Tab title="Linux (Ubuntu/Debian)">
+    Install Node.js via the NodeSource repository:
+
+    ```bash
+    curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash -
+    sudo apt-get install -y nodejs
+    node -v
+    ```
+  </Tab>
+</Tabs>
+
+## Apache Solr
+
+Hyrax requires **Solr 5.x or later** (tested up to 8.11.1, which includes the log4j library update).
+
+If you are using Lando, Solr is managed for you. For manual installation:
+
+<Tabs>
+  <Tab title="macOS">
+    ```bash
+    brew install solr
+    brew services start solr
+    ```
+  </Tab>
+  <Tab title="Linux">
+    Download a Solr release from [solr.apache.org](https://solr.apache.org/downloads.html) and follow the [Solr installation guide](https://solr.apache.org/guide/installing-solr.html).
+
+    ```bash
+    # Example for Solr 8.11.1
+    wget https://archive.apache.org/dist/lucene/solr/8.11.1/solr-8.11.1.tgz
+    tar xzf solr-8.11.1.tgz
+    solr-8.11.1/bin/install_solr_service.sh solr-8.11.1.tgz
+    ```
+  </Tab>
+</Tabs>
+
+<Note>
+  Hyrax ships with a Solr configuration. See the [Hyrax Development Guide](https://github.com/samvera/hyrax/wiki/Hyrax-Development-Guide) for instructions on creating the Hyrax Solr core in a development environment.
+</Note>
+
+## Fedora Commons
+
+Fedora is the binary and metadata store for Hyrax. The required version depends on your persistence strategy:
+
+- **Valkyrie with Fedora adapter**: Fedora Commons **>= 6.5.1**
+- **Legacy ActiveFedora**: Fedora Commons **>= 4.7.6 and < 5**
+
+<Note>
+  Hyrax v5 defaults to Valkyrie persistence. With Valkyrie you can also use the **PostgreSQL adapter** instead of Fedora entirely, which is the setup Lando uses by default (via Koppie). If you are starting fresh, consider the PostgreSQL-backed Valkyrie setup to reduce operational complexity.
+</Note>
+
+<Tabs>
+  <Tab title="macOS">
+    Download the Fedora Commons WAR file and deploy it to a servlet container such as Jetty or Tomcat, or use the Fedora standalone distribution:
+
+    ```bash
+    # Fedora 6 standalone
+    wget https://github.com/fcrepo/fcrepo/releases/download/fcrepo-6.5.1/fcrepo-webapp-6.5.1.jar
+    java -jar fcrepo-webapp-6.5.1.jar
+    ```
+
+    Fedora will be available at `http://localhost:8080/rest`.
+  </Tab>
+  <Tab title="Linux">
+    ```bash
+    wget https://github.com/fcrepo/fcrepo/releases/download/fcrepo-6.5.1/fcrepo-webapp-6.5.1.jar
+    java -jar fcrepo-webapp-6.5.1.jar
+    ```
+  </Tab>
+  <Tab title="Docker">
+    ```bash
+    docker run -p 8080:8080 fcrepo/fcrepo:6.5.1
+    ```
+  </Tab>
+</Tabs>
+
+## PostgreSQL
+
+PostgreSQL is the recommended SQL RDBMS for Hyrax. It stores user accounts, workflow state, collection metadata, and (when using the Valkyrie PostgreSQL adapter) repository object data.
+
+<Tabs>
+  <Tab title="macOS">
+    ```bash
+    brew install postgresql@14
+    brew services start postgresql@14
+    ```
+  </Tab>
+  <Tab title="Linux (Ubuntu/Debian)">
+    ```bash
+    sudo apt-get update
+    sudo apt-get install -y postgresql postgresql-contrib libpq-dev
+    sudo systemctl start postgresql
+    sudo systemctl enable postgresql
+    ```
+  </Tab>
+</Tabs>
+
+## Redis
+
+Redis provides activity streams on repository objects and users, and acts as a global mutex for multi-threaded operations. Hyrax depends on the `redis` gem (~> 4.0).
+
+<Tabs>
+  <Tab title="macOS">
+    ```bash
+    brew install redis
+    brew services start redis
+    redis-cli ping
+    # => PONG
+    ```
+  </Tab>
+  <Tab title="Linux (Ubuntu/Debian)">
+    ```bash
+    sudo apt-get install -y redis-server
+    sudo systemctl start redis-server
+    sudo systemctl enable redis-server
+    redis-cli ping
+    # => PONG
+    ```
+  </Tab>
+</Tabs>
+
+## ImageMagick with JPEG-2000 support
+
+Hyrax uses ImageMagick to generate thumbnail and PDF derivatives. The ImageMagick installation **must include JPEG-2000 (OpenJPEG) support** to handle JP2 files common in library digitization workflows.
+
+<Tabs>
+  <Tab title="macOS">
+    ```bash
+    brew install imagemagick
+    # Homebrew's ImageMagick includes OpenJPEG by default.
+    convert -list format | grep JP2
+    ```
+  </Tab>
+  <Tab title="Linux (Ubuntu/Debian)">
+    Install ImageMagick with the libjpeg and OpenJPEG development libraries:
+
+    ```bash
+    sudo apt-get install -y imagemagick libmagickwand-dev libjpeg-dev libopenjp2-7-dev
+    convert -list format | grep JP2
+    ```
+
+    If `JP2` does not appear in the output, ImageMagick was built without JP2 support and must be compiled from source with OpenJPEG enabled.
+  </Tab>
+</Tabs>
+
+## FITS (File Information Tool Set)
+
+FITS performs file characterization — identifying file format, MIME type, technical metadata — for deposited content. Hyrax has been tested with FITS up to **version 1.5.0**. Avoid version 1.1.0.
+
+<AccordionGroup>
+  <Accordion title="FITS servlet (recommended)">
+    Running FITS as a web service avoids the slow JVM startup time on every characterization request and improves performance significantly. A container image is available:
+
+    ```bash
+    docker run -p 8080:8080 ghcr.io/samvera/fitsservlet:latest
+    ```
+
+    Lando uses this approach automatically in the generated `.lando.yml`. Configure the servlet URL in `config/initializers/hyrax.rb`:
+
+    ```ruby
+    Hyrax.config do |config|
+      config.fits_message_length = 1000
+      # FITS servlet URL is set via environment variable FITS_SERVLET_URL
+    end
+    ```
+  </Accordion>
+  <Accordion title="Local FITS installation on macOS">
+    Install FITS using Homebrew:
+
+    ```bash
+    brew install fits
+    fits.sh -h
+    ```
+
+    Verify the output shows a FITS help message, then give your Hyrax app access by either adding `fits.sh` to your `PATH` in `.bash_profile` / `.zshrc`, or setting the path in the Hyrax initializer:
+
+    ```ruby
+    # config/initializers/hyrax.rb
+    Hyrax.config do |config|
+      config.fits_path = "/usr/local/bin/fits.sh"
+    end
+    ```
+  </Accordion>
+  <Accordion title="Local FITS installation on Linux">
+    Download a known-working FITS release (up to 1.5.0) from [Harvard's FITS project](http://projects.iq.harvard.edu/fits/downloads):
+
+    ```bash
+    wget https://github.com/harvard-lts/fits/releases/download/1.5.0/fits-1.5.0.zip
+    unzip fits-1.5.0.zip -d ~/fits
+    chmod a+x ~/fits/fits.sh
+    ~/fits/fits.sh -h
+    ```
+
+    Add FITS to your PATH or configure the path in `config/initializers/hyrax.rb`:
+
+    ```ruby
+    Hyrax.config do |config|
+      config.fits_path = "#{ENV['HOME']}/fits/fits.sh"
+    end
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## LibreOffice
+
+LibreOffice converts documents (Word, Excel, PowerPoint, etc.) into derivative PDFs that Hyrax can serve. It is required for the derivative generation background jobs.
+
+<Tabs>
+  <Tab title="macOS">
+    Download and install LibreOffice from [libreoffice.org](https://www.libreoffice.org/download/download/). On macOS, `soffice` (the LibreOffice headless binary) lives inside the application bundle:
+
+    ```bash
+    # Verify soffice is reachable
+    which soffice || echo "Not in PATH"
+
+    # Add to PATH in ~/.zshrc or ~/.bash_profile if needed:
+    export PATH="$PATH:/Applications/LibreOffice.app/Contents/MacOS"
+    ```
+
+    You may also need Ghostscript if it is not bundled with your LibreOffice build:
+
+    ```bash
+    brew install ghostscript
+    ```
+  </Tab>
+  <Tab title="Linux (Ubuntu/Debian)">
+    ```bash
+    sudo apt-get install -y libreoffice
+    which soffice
+    # => /usr/bin/soffice
+    ```
+
+    If `which soffice` returns a path, LibreOffice is correctly on your `PATH` and Hyrax will find it automatically. Otherwise, add the full path to `soffice` to your `PATH`.
+  </Tab>
+</Tabs>
+
+## ffmpeg (optional — audio/video transcoding)
+
+Hyrax supports transcoding audio and video files when **ffmpeg > 1.0** is installed and transcoding is enabled in the Hyrax configuration.
+
+<Tabs>
+  <Tab title="macOS">
+    ```bash
+    brew install libvpx ffmpeg
+    ffmpeg -version
+    ```
+  </Tab>
+  <Tab title="Linux (Ubuntu/Debian)">
+    ```bash
+    sudo apt-get install -y ffmpeg
+    ffmpeg -version
+    ```
+
+    If the version available in your package manager is too old, compile ffmpeg from source using the [ffmpeg compilation guide](https://trac.ffmpeg.org/wiki/CompilationGuide).
+  </Tab>
+</Tabs>
+
+Once installed, enable transcoding in `config/initializers/hyrax.rb`:
+
+```ruby
+Hyrax.config do |config|
+  config.enable_ffmpeg = true
+  # config.ffmpeg_path = "/usr/local/bin/ffmpeg"  # only needed if not in PATH
+end
+```
+
+## Verify your environment
+
+After installing all prerequisites, verify the key tools are available:
+
+```bash
+ruby -v        # => ruby 3.3.x
+rails -v       # => Rails 7.2.2.1
+node -v        # => v20.x.x (or similar LTS)
+redis-cli ping # => PONG
+convert -version | head -1  # => Version: ImageMagick ...
+fits.sh -h 2>&1 | head -3   # => FITS version ...
+soffice --version            # => LibreOffice ...
+```
+
+## Next steps
+
+With all prerequisites in place, generate your Hyrax application:
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Use the Rails template to generate a Hyrax 5.2.0 application, start Lando, run migrations, and generate your first work type.
+  </Card>
+  <Card title="Introduction" icon="book-open" href="/introduction">
+    Learn what Hyrax is, how its components relate, and whether it is the right fit for your institution.
+  </Card>
+</CardGroup>

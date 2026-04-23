@@ -1,0 +1,204 @@
+---
+title: "Generating and Customizing Work Types"
+description: "Create custom repository object types with Hyrax's Rails generators, then add metadata attributes, customize deposit forms, and register the work type."
+---
+
+Work types are the core content model in Hyrax — they define the kinds of objects your repository holds, along with their metadata attributes, deposit forms, indexing behavior, and display views. Hyrax ships with a Rails generator that scaffolds all the boilerplate needed for a new work type, so you can focus on domain-specific customization rather than wiring.
+
+## Generating a work type
+
+Run the `hyrax:work_resource` generator and pass a CamelCased model name:
+
+```bash
+rails generate hyrax:work_resource MovingImage
+```
+
+If your application requires namespaced work types, add a slash to the model name. The following creates the class `MovingImage` inside the `My` module:
+
+```bash
+rails generate hyrax:work_resource My/MovingImage
+```
+
+<Note>
+The name `Work` is reserved and will raise an error. Choose a descriptive domain name like `Article`, `Dataset`, or `MovingImage` instead.
+</Note>
+
+## What the generator creates
+
+Running the generator produces the following files:
+
+| File | Purpose |
+|---|---|
+| `app/models/moving_image.rb` | Valkyrie resource model |
+| `app/indexers/moving_image_indexer.rb` | Solr indexing logic |
+| `app/forms/moving_image_form.rb` | Deposit / edit form |
+| `app/controllers/hyrax/moving_images_controller.rb` | CRUD controller |
+| `app/views/hyrax/moving_images/_moving_image.html.erb` | Search result partial |
+| `config/metadata/moving_image.yaml` | Schema definition file |
+
+It also injects a `config.register_curation_concern` call into `config/initializers/hyrax.rb`.
+
+<Steps>
+  <Step title="Model">
+    The generated model inherits from `Hyrax::Work` and includes the core, basic, and work-specific metadata schemas:
+
+    ```ruby
+    # app/models/moving_image.rb
+    # Generated via `rails generate hyrax:work_resource MovingImage`
+    class MovingImage < Hyrax::Work
+      if Hyrax.config.work_include_metadata?
+        include Hyrax::Schema(:core_metadata) unless Hyrax.config.work_default_metadata?
+        include Hyrax::Schema(:basic_metadata)
+        include Hyrax::Schema(:moving_image)
+      end
+    end
+    ```
+  </Step>
+
+  <Step title="Indexer">
+    The indexer maps resource attributes to Solr fields. Override `to_solr` to add custom index keys:
+
+    ```ruby
+    # app/indexers/moving_image_indexer.rb
+    class MovingImageIndexer < Hyrax::Indexers::PcdmObjectIndexer(MovingImage)
+      if Hyrax.config.work_include_metadata?
+        include Hyrax::Indexer(:core_metadata)
+        include Hyrax::Indexer(:basic_metadata)
+        include Hyrax::Indexer(:moving_image)
+      end
+      check_if_flexible(MovingImage)
+
+      # def to_solr
+      #   super.tap do |index_document|
+      #     index_document[:duration_tesim] = resource.duration.map(&:to_s)
+      #   end
+      # end
+    end
+    ```
+  </Step>
+
+  <Step title="Form">
+    The form is a Valkyrie `ChangeSet`-based class. Add virtual fields or override form properties here:
+
+    ```ruby
+    # app/forms/moving_image_form.rb
+    class MovingImageForm < Hyrax::Forms::PcdmObjectForm(MovingImage)
+      if Hyrax.config.work_include_metadata?
+        include Hyrax::FormFields(:basic_metadata)
+        include Hyrax::FormFields(:moving_image)
+      end
+      check_if_flexible(MovingImage)
+
+      # property :user_input_not_destined_for_the_model, virtual: true
+    end
+    ```
+  </Step>
+
+  <Step title="Controller">
+    The controller mixes in `Hyrax::WorksControllerBehavior` for standard CRUD actions and uses `Hyrax::FormFactory` for Valkyrie-aware form generation:
+
+    ```ruby
+    # app/controllers/hyrax/moving_images_controller.rb
+    module Hyrax
+      class MovingImagesController < ApplicationController
+        include Hyrax::WorksControllerBehavior
+        include Hyrax::BreadcrumbsForWorks
+        self.curation_concern_type = ::MovingImage
+        self.work_form_service = Hyrax::FormFactory.new
+      end
+    end
+    ```
+  </Step>
+</Steps>
+
+## Adding custom attributes
+
+Custom attributes are declared in the schema YAML file generated at `config/metadata/moving_image.yaml`. The generator starts you with an empty `attributes: {}` block:
+
+<CodeGroup>
+```yaml config/metadata/moving_image.yaml (before)
+# Generated via `rails generate hyrax:work_resource MovingImage`
+attributes: {}
+```
+
+```yaml config/metadata/moving_image.yaml (after)
+attributes:
+  duration:
+    type: string
+    multiple: false
+    index_keys:
+      - "duration_sim"
+      - "duration_tesim"
+    form:
+      required: false
+      primary: false
+      multiple: false
+    predicate: http://purl.org/dc/terms/extent
+
+  format:
+    type: string
+    multiple: true
+    index_keys:
+      - "format_sim"
+      - "format_tesim"
+    form:
+      required: false
+      primary: false
+      multiple: true
+    predicate: http://purl.org/dc/elements/1.1/format
+```
+</CodeGroup>
+
+Valid `type` values are: `string`, `integer`, `boolean`, `date_time`, `float`, `id`, and `uri`.
+
+You can also pass attributes directly to the generator and have the YAML populated automatically:
+
+```bash
+rails generate hyrax:work_resource MovingImage duration:string format:string
+```
+
+## Registering your work type
+
+The generator automatically appends a registration line to `config/initializers/hyrax.rb`:
+
+```ruby
+# config/initializers/hyrax.rb
+Hyrax.config do |config|
+  # Injected via `rails g hyrax:work_resource MovingImage`
+  config.register_curation_concern :moving_image
+end
+```
+
+For a namespaced work type (`My::MovingImage`), the symbol uses a path-style format:
+
+```ruby
+config.register_curation_concern :"my/moving_image"
+```
+
+## Customizing the form
+
+The form class inherits from `Hyrax::Forms::PcdmObjectForm` and uses Valkyrie's `ChangeSet` interface. You can add required form fields, mark fields as primary (shown prominently in the deposit form), or introduce virtual attributes that are not persisted to the model:
+
+```ruby
+# app/forms/moving_image_form.rb
+class MovingImageForm < Hyrax::Forms::PcdmObjectForm(MovingImage)
+  include Hyrax::FormFields(:basic_metadata)
+  include Hyrax::FormFields(:moving_image)
+  check_if_flexible(MovingImage)
+
+  # A form-only field for user acknowledgement — not stored on the model
+  property :rights_confirmation, virtual: true
+
+  # Override required fields from the schema
+  property :duration, required: true
+end
+```
+
+<CardGroup cols={2}>
+  <Card title="Metadata Schemas" icon="table" href="/guides/metadata">
+    Learn how YAML schema files define attributes, index keys, and form properties for all work types.
+  </Card>
+  <Card title="Works and FileSets" icon="file" href="/concepts/works-and-filesets">
+    Understand the relationship between Works, FileSets, and the PCDM data model underlying Hyrax.
+  </Card>
+</CardGroup>

@@ -1,0 +1,143 @@
+---
+title: "Toggling Optional Features with Flipflop"
+description: "How to enable and disable optional Hyrax capabilities using the Flipflop feature flag system, the admin dashboard, and config/features.yml."
+---
+
+Hyrax uses [Flipflop](https://github.com/voormedia/flipflop) to manage optional capabilities as named feature flags. Each flag can be toggled independently without changing application code. Flags can be set through the admin dashboard, a YAML configuration file, or browser cookies for per-session overrides. When multiple strategies are active, Flipflop evaluates them in a fixed priority order.
+
+## Strategy evaluation order
+
+Hyrax registers strategies in the following order. The first strategy that returns a non-nil value wins.
+
+1. **Cookie** — A browser cookie set during a session. Useful for local testing.
+2. **Active Record** — A `Hyrax::Feature` record in the database, modified through the admin dashboard.
+3. **YAML** — Values read from `config/features.yml` (path configurable).
+4. **Default** — The hard-coded default declared in `config/features.rb`.
+
+<Note>
+  Because the database strategy is evaluated before the YAML strategy, a flag toggled through the admin dashboard at `/admin/features` takes precedence over any value in `config/features.yml`. To reset a flag to its YAML or default value, use the dashboard to remove the database override.
+</Note>
+
+## Toggling features in the admin dashboard
+
+Navigate to `/admin/features`. You must hold the admin role to access this page. Each feature is listed with its current state and the strategy that resolved it. Use the **Enable** / **Disable** buttons to write a database override via `Hyrax::Feature`.
+
+To undo a database override and fall back to the YAML or default value, click **Reset** next to a feature.
+
+## Configuring features via YAML
+
+Create `config/features.yml` in your application root and set each flag by its key name.
+
+<CodeGroup>
+
+```yaml config/features.yml (all flags shown)
+# Site configuration
+cache_work_iiif_manifest:
+  enabled: false
+
+iiif_av:
+  enabled: false
+
+iiif_pdf:
+  enabled: false
+
+hide_private_items:
+  enabled: false
+
+hide_social_buttons:
+  enabled: false
+
+hide_users_list:
+  enabled: true
+
+read_only:
+  enabled: false
+
+# Repository management
+active_deposit_agreement_acceptance:
+  enabled: true
+
+assign_admin_set:
+  enabled: true
+
+batch_upload:
+  enabled: false
+
+proxy_deposit:
+  enabled: true
+
+show_deposit_agreement:
+  enabled: true
+
+transfer_works:
+  enabled: true
+```
+
+```yaml config/features.yml (minimal example)
+read_only:
+  enabled: true
+
+batch_upload:
+  enabled: true
+```
+
+</CodeGroup>
+
+<Warning>
+  Setting `read_only: enabled: true` prevents all deposits, edits, workflow approvals, and any other data-modifying action across the entire repository. Enable this flag only during scheduled maintenance. Remember that a database override from the dashboard takes precedence, so verify the dashboard state as well.
+</Warning>
+
+## Changing the features file path
+
+If you need to store the features file at a non-standard location, set `feature_config_path` in your Hyrax initialiser:
+
+```ruby config/initializers/hyrax.rb
+Hyrax.config do |config|
+  config.feature_config_path = Rails.root.join('config', 'hyrax_features.yml')
+end
+```
+
+## Available features
+
+### Site configuration group
+
+| Feature key | Default | Description |
+|---|---|---|
+| `cache_work_iiif_manifest` | disabled | Cache IIIF manifest JSON documents using `Rails.cache` |
+| `iiif_av` | disabled | Enable audio/video support in IIIF v3 manifests |
+| `iiif_pdf` | disabled | Enable PDF content support in IIIF v3 manifests |
+| `hide_private_items` | disabled | Hide private (restricted) items from public search results |
+| `hide_social_buttons` | disabled | Remove social media share buttons from work show pages |
+| `hide_users_list` | **enabled** | Require authentication before showing the users list |
+| `read_only` | disabled | Put the repository into read-only mode, disabling all writes |
+
+### Repository management group
+
+| Feature key | Default | Description |
+|---|---|---|
+| `active_deposit_agreement_acceptance` | set by config | Require depositors to check a checkbox to actively accept the deposit agreement |
+| `assign_admin_set` | **enabled** | Allow depositors to choose an admin set during submission. When disabled, all works are placed in the default admin set |
+| `batch_upload` | disabled | Enable the batch upload interface for submitting multiple works at once |
+| `proxy_deposit` | **enabled** | Allow depositors to designate proxy users who can deposit on their behalf |
+| `show_deposit_agreement` | **enabled** | Display the deposit agreement page during work submission |
+| `transfer_works` | **enabled** | Allow depositors to transfer ownership of works to another user |
+
+<Note>
+  The default value for `active_deposit_agreement_acceptance` is driven by `Hyrax.config.active_deposit_agreement_acceptance?`, which itself defaults to `true`. You can set this independently of the feature flag in your Hyrax initialiser.
+</Note>
+
+## Checking feature state in code
+
+Flipflop exposes a helper method for conditional logic inside controllers, views, and services:
+
+```ruby
+# In a controller or view
+if Flipflop.enabled?(:read_only)
+  redirect_to root_path, alert: 'The repository is in read-only mode.'
+end
+
+# Equivalent helper available in views after including Flipflop helpers
+if feature?(:proxy_deposit)
+  render 'proxy_deposit_section'
+end
+```
